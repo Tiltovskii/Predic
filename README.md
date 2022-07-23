@@ -1,4 +1,5 @@
-# Predict-CSGO-and-Dota-matches
+# Predic
+**Predict CS:GO and Dota 2 matches**
 
 Что за Predic?
 ------------------------------------
