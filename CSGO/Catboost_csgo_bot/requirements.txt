@@ -1,0 +1,7 @@
+beautifulsoup4==4.11.1
+catboost==1.0.6
+numpy==1.22.3
+pandas==1.4.2
+pyTelegramBotAPI==4.6.0
+requests==2.27.1
+schedule==1.1.0
