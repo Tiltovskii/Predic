@@ -1,0 +1,353 @@
+# Predic v2 data layer
+
+This directory contains the point-in-time data foundation for a CS/CS2 match
+prediction project. Network capture is disabled by default. The HLTV collector
+may be enabled only for routes and uses covered by explicit written permission;
+the permission reference, scope, time window, host/path/query allowlists, user
+agent, contact, delay, and request limits are immutable inputs to every capture
+stream. There is no anti-bot bypass, browser impersonation, proxy rotation, or
+parallel request mode.
+
+The initial implementation uses only Python's standard library and SQLite so it
+can validate the contract before a large provider-specific backfill. Raw source
+artifacts remain append-only; normalized rows retain source identity, revision,
+and three distinct timestamps:
+
+- `event_at`: when the game event happened;
+- `known_at`: when the value became available to a predictor;
+- `observed_at`: when our ingestion process retrieved it.
+
+## Quick start
+
+```bash
+cd v2
+python3 -m venv .venv
+.venv/bin/pip install -e .
+predic-data init --db data/predic.sqlite3
+predic-data import-legacy \
+  --db data/predic.sqlite3 \
+  --csv ../CSGO/NN_csgo/mathes_for_a_5_years.csv \
+  --from-date 2018-01-01
+predic-data audit --db data/predic.sqlite3
+```
+
+The legacy importer deduplicates the mirrored team-order augmentation in the
+old CSV and marks all reconstructed identities as low-confidence. It is useful
+for bootstrapping and regression tests, not as a source of historically known
+pre-match lineups or rankings. Its source snapshot has
+`point_in_time_eligible = 0`; unknown legacy `known_at` values remain `NULL`.
+Because the file has no stable match identifier, every legacy map is stored in
+its own low-confidence series instead of guessing BO3/BO5 group boundaries.
+
+## Layers
+
+1. `source_snapshot` is the bronze manifest for immutable files/API payloads.
+2. Entity, match, map, lineup, stats, ranking, and odds tables are normalized
+   silver data.
+3. Training examples must use only point-in-time-eligible snapshots and be
+   materialized with `known_at <= prediction_at`.
+
+The schema keeps organization, competitive team/core, and lineup separate.
+Provider connectors should be added only after their storage, ML, and betting
+permissions are confirmed.
+
+## Resumable authorized exports
+
+`import-jsonl` ingests an immutable JSONL export without assuming a provider
+schema. Each line is retained verbatim after canonical JSON serialization and
+may contain `record_id`, `kind`, `event_at`, and `known_at` fields:
+
+```json
+{"record_id":"match-42","kind":"match","event_at":"2025-01-02T12:00:00Z","payload":{"winner":"team-a"}}
+```
+
+```bash
+predic-data import-jsonl \
+  --db data/predic.sqlite3 \
+  --jsonl /path/to/authorized-export.jsonl \
+  --source licensed-provider \
+  --stream matches-2018-2026 \
+  --batch-size 1000 \
+  --license-ref /path/to/provider-license.txt
+```
+
+The byte cursor advances in the same transaction as each inserted batch. A
+restart with the same command resumes exactly at the last committed offset;
+stable record IDs make replay idempotent. If the file content changes, the
+import stops and requires a new stream name instead of mixing revisions.
+
+## Offline HLTV HTML adapter
+
+The HLTV adapter has no HTTP client and accepts only an already captured local
+HTML file. It emits deterministic typed JSONL records while leaving
+`known_at = null`; a current rendering of an old match does not prove that a
+field was historically available before the match.
+
+```bash
+predic-data parse-hltv-html \
+  --html /path/to/authorized-match.html \
+  --source-url https://www.hltv.org/matches/123/example \
+  > authorized-match.jsonl
+```
+
+The output contains source numeric IDs, the document SHA-256, parser/schema
+versions, raw metric cells, and warnings for partial or ambiguous fields.
+Unplayed maps, missing ranks, absent Swing values, and unknown game/rating
+versions remain explicit rather than being converted to sentinel numbers.
+Map records keep named `score_a`/`score_b`, series map score, completed round
+count, regulation/overtime counts, parsed half/OT segments, and the raw score
+breakdown. Rulesets use `MR15`/`MR12` terminology; a first-to-16/first-to-13
+winning score is not mislabeled as MR16/MR13.
+
+## Authorized resumable HLTV capture
+
+The repository contains a sequential raw HTML capture layer, but the checked-in
+example policy has `live_enabled: false`. Copy the examples and replace every
+placeholder only after checking the exact written permission:
+
+```bash
+cp examples/hltv_capture_policy.example.json data/hltv-policy.json
+cp examples/hltv_capture_manifest.example.jsonl data/hltv-pilot.jsonl
+```
+
+The configured `contact` must occur in the `user_agent`. Allowed query keys are
+explicit; redirects are followed manually and every hop must remain inside the
+same configured scope. `robots_txt_mode: respect` currently fails closed.
+`written_permission_override` is valid only when the written permission itself
+explicitly covers the configured routes despite the public robots policy.
+
+Validate the policy and every URL without creating state or using the network:
+
+```bash
+predic-data plan-hltv-capture \
+  --policy data/hltv-policy.json \
+  --manifest data/hltv-pilot.jsonl \
+  --max-pages 20 \
+  --max-http-requests 40
+```
+
+A successful plan means only that the files are structurally valid and every
+URL is inside the declared scope. It does not prove that HLTV granted that
+scope; the authorization fields must be copied from the actual written
+permission before live capture is enabled.
+
+After the policy matches the permission, a bounded pilot is:
+
+```bash
+predic-data capture-hltv-html \
+  --policy data/hltv-policy.json \
+  --manifest data/hltv-pilot.jsonl \
+  --state-db data/hltv-capture.sqlite3 \
+  --output-dir data/raw/hltv \
+  --stream pilot-2026-08-25 \
+  --max-pages 20 \
+  --max-http-requests 40
+```
+
+Run the same command again to resume. Completed pages are never requested again;
+if the process dies in the narrow interval after a response but before its
+completion transaction, the current page may be requested once more. Raw bodies
+are content-addressed and never overwritten. One shared state database must be
+used for all streams so host-level cooldowns and blocks are preserved. A 401,
+403, 406, 418, or 451 opens a manual-review circuit; 429 honors `Retry-After` and
+the local exponential backoff. These stops and terminal page failures produce a
+non-zero CLI exit status.
+
+Do not retry a 401/403-style stop. After HLTV explicitly clarifies the route or
+permission, record that review before starting a new stream; the command keeps
+the original request timestamp and writes an audit row. It cannot clear a 429
+cooldown.
+
+```bash
+predic-data review-hltv-host-circuit \
+  --state-db data/hltv-capture.sqlite3 \
+  --host www.hltv.org \
+  --authorization-ref 'HLTV follow-up, 2026-08-25' \
+  --reason 'HLTV confirmed the permitted historical listing route'
+```
+
+Once every pilot page succeeded, verify each raw SHA and parse the captures:
+
+```bash
+predic-data export-hltv-capture-index \
+  --state-db data/hltv-capture.sqlite3 \
+  --stream pilot-2026-08-25 \
+  > data/hltv-pilot-captures.jsonl
+
+predic-data parse-hltv-captures \
+  --state-db data/hltv-capture.sqlite3 \
+  --stream pilot-2026-08-25 \
+  > data/hltv-pilot-parsed.jsonl
+
+predic-data import-jsonl \
+  --db data/predic.sqlite3 \
+  --jsonl data/hltv-pilot-parsed.jsonl \
+  --source authorized-hltv-capture \
+  --stream pilot-2026-08-25-parsed \
+  --license-ref /path/to/redacted-permission-reference.txt
+```
+
+`parse-hltv-captures` validates and stages the entire stream before writing its
+first JSONL record, so a corrupt or unexpected later page cannot leave an
+importable-looking prefix. Import only after the parse command exits with zero.
+
+Do not pass `--point-in-time-eligible` for historical pages captured today.
+Their records retain the real capture `observed_at`, but `known_at` remains null:
+a current rendering of a 2018 match cannot prove what was known before that
+match began. Partial export is rejected by default; `--allow-partial` exists for
+explicit diagnostics only.
+
+## Full-history discovery: results → matches → map stats
+
+The old project paginated `/results` and immediately discarded URLs and source
+IDs. v2 does not repeat that: it treats listing pages as their own authorized
+capture type, preserves the raw listing SHA, then derives immutable manifests
+for the next layer. No numeric-ID scan and no guessed map-stats URL is used.
+
+### Current route status
+
+The 2026-08-25 sentinel captured `/results` successfully and found ordinary
+`offset` pagination. The separate historical request
+`/results?startDate=2018-01-01&endDate=2018-01-07` returned HTTP 403. HLTV then
+asked for slower sequential collection, so the local policy was tightened to a
+five-minute interval and exactly one fresh historical probe was made in a new
+stream. That probe also returned HTTP 403. The shared capture state therefore
+has an open host circuit, and **no retry or bulk backfill may be started from
+this repository yet**. This is not evidence that the written permission is
+invalid; it is a concrete route-level response that needs a more specific HLTV
+clarification.
+
+Ask HLTV to confirm the exact approved historical listing URL(s), query
+parameters, pagination semantics, rate limit, and whether this collector's
+IP/user-agent must be allowlisted. In particular, ask whether the date filter
+above is the intended route. Do not clear the host circuit until that answer is
+recorded in the local policy/review command. A generic
+all-time `/results` walk is not presented as a full-backfill route: the
+successful page reported over 121k results, so one-page-at-a-time pagination
+would be impractically deep without an explicitly approved bounded route.
+
+### After HLTV confirms the exact historical route
+
+Generate root date windows *locally*. The command below only writes a manifest;
+do not submit its output until the template has been confirmed by HLTV and is
+allowlisted in the policy.
+
+```bash
+predic-data generate-hltv-results-manifest \
+  --start-date 2018-01-01 \
+  --end-date 2018-01-31 \
+  --window-days 7 \
+  --url-template 'https://www.hltv.org/results?startDate={start_date}&endDate={end_date}' \
+  > data/results-2018-01.jsonl
+```
+
+Capture a bounded root batch under a new immutable stream. The collector stores
+the exact requested/final URL, raw body hash, and listing metadata. A listing
+whose redirect changes identity, whose pagination drops the requested date
+window, or whose displayed `Results for …` date is outside the claimed window
+is rejected before it can produce a match manifest.
+
+```bash
+predic-data capture-hltv-html \
+  --policy data/hltv-policy.json \
+  --manifest data/results-2018-01.jsonl \
+  --state-db data/hltv-capture.sqlite3 \
+  --output-dir data/raw/hltv \
+  --stream results-2018-01 \
+  --max-pages 20 \
+  --max-http-requests 40
+```
+
+If the approved date window has more than one results page, derive (offline)
+the next child manifest from all captured pages. It emits only real pagination
+links that are not already captured; every child retains a verified parent
+stream, record ID, URLs, SHA, timestamp, and exact discovered link. Capture
+that file under a **new** stream, add it to the repeated `--stream` list, and
+repeat until the report says `coverage_complete: true`.
+
+```bash
+predic-data derive-hltv-results-pagination-manifest \
+  --state-db data/hltv-capture.sqlite3 \
+  --stream results-2018-01 \
+  > data/results-2018-01-page-1.jsonl 2> data/results-2018-01-pagination-report.json
+
+predic-data capture-hltv-html \
+  --policy data/hltv-policy.json \
+  --manifest data/results-2018-01-page-1.jsonl \
+  --state-db data/hltv-capture.sqlite3 \
+  --output-dir data/raw/hltv \
+  --stream results-2018-01-page-1 \
+  --max-pages 20 \
+  --max-http-requests 40
+```
+
+Only after pagination closes, aggregate the full root+child graph. This command
+fails closed by default: it writes no match JSONL if a pagination page or date
+window is missing. `--allow-incomplete` is diagnostics only.
+
+```bash
+predic-data aggregate-hltv-match-manifest \
+  --state-db data/hltv-capture.sqlite3 \
+  --stream results-2018-01 \
+  --stream results-2018-01-page-1 \
+  --start-date 2018-01-01 \
+  --end-date 2018-01-31 \
+  > data/matches-2018-01.jsonl 2> data/results-2018-01-report.json
+```
+
+Capture that exact match manifest under its own stream. After those match
+captures have passed parsing, derive the statistics manifest from actual
+`mapstatsid` links embedded in the match HTML. This also fails closed if any
+played map has no exact link; `--allow-incomplete` is diagnostics only:
+
+```bash
+predic-data extract-hltv-mapstats-manifest \
+  --state-db data/hltv-capture.sqlite3 \
+  --stream matches-2018-01 \
+  > data/mapstats-2018-01.jsonl 2> data/matches-2018-01-report.json
+```
+
+Run results, matches, and map-stats as separate small immutable streams (for
+example one short approved window at a time), always sharing the same capture
+state DB. This makes long runs resumable, preserves the host cooldown/block
+circuit across batches, and leaves a checkable parent-SHA chain from player
+stats back to the listing page that discovered the match.
+
+## Materializing model tables
+
+`import-jsonl` is the bronze archive; it intentionally keeps every parsed
+record verbatim. The next local step writes only verified relations into the
+normalized tables used for modeling. Use dependency-safe phases for a large
+stream: first `series`, then `map`, then `ranking`; after the corresponding
+match stream is complete, materialize `player_map_stats` from the map-stats
+stream. Each command returns `next_raw_record_id`; repeat the same phase with
+that value as `--after-raw-record-id` while `has_more` is true.
+
+```bash
+predic-data materialize-hltv-stream \
+  --db data/predic.sqlite3 \
+  --source authorized-hltv-capture \
+  --stream matches-2018-01-parsed \
+  --kind series \
+  --max-records 10000
+
+predic-data materialize-hltv-stream \
+  --db data/predic.sqlite3 \
+  --source authorized-hltv-capture \
+  --stream matches-2018-01-parsed \
+  --kind map \
+  --max-records 10000
+
+predic-data materialize-hltv-stream \
+  --db data/predic.sqlite3 \
+  --source authorized-hltv-capture \
+  --stream mapstats-2018-01-parsed \
+  --kind player_map_stats \
+  --max-records 10000
+```
+
+The materializer never turns the collection timestamp into `known_at`, invents
+a map for orphan player stats, or maps a match-page lineup onto every map. Such
+records remain retained in bronze and are returned in the bounded
+`quarantined` report for follow-up. This is deliberate: it protects both the
+training corpus and later point-in-time evaluation from invented joins.

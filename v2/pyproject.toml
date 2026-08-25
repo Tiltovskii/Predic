@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "predic-v2"
+version = "0.1.0"
+description = "Point-in-time CS/CS2 data ingestion and backtesting dataset"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+predic-data = "predic_v2.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+predic_v2 = ["schema.sql"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
