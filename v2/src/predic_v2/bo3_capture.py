@@ -1914,8 +1914,8 @@ def capture_bo3(
         )
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
-    if workers < 1 or workers > 16:
-        raise ValueError("workers must be between 1 and 16")
+    if workers < 1 or workers > 32:
+        raise ValueError("workers must be between 1 and 32")
     for url in (
         _catalog_url(
             start_date,
