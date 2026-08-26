@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 from predic_v2.bo3_capture import (
     Bo3SourceChangedError,
@@ -189,6 +189,8 @@ class Bo3CaptureTest(unittest.TestCase):
         stream: str = "history",
         profile: str = "core",
         continue_on_quality_error: bool = False,
+        continue_on_network_error: bool = False,
+        quarantine_incomplete: bool = False,
     ) -> dict[str, object]:
         return capture_bo3(
             root / "state.sqlite3",
@@ -200,6 +202,8 @@ class Bo3CaptureTest(unittest.TestCase):
             profile=profile,
             max_requests=max_requests,
             continue_on_quality_error=continue_on_quality_error,
+            continue_on_network_error=continue_on_network_error,
+            quarantine_incomplete=quarantine_incomplete,
             opener=opener,
             now_fn=clock.now,
             sleep_fn=clock.sleep,
@@ -341,6 +345,53 @@ class Bo3CaptureTest(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertIn("game_players:retry", result["task_counts"])
             self.assertEqual(1, result["gaps"]["finished_game_player_gap_count"])
+
+    def test_historical_bulk_mode_quarantines_incomplete_payload_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            result = self._capture(
+                root,
+                _Opener(
+                    [
+                        lambda url: _Response(url, _catalog()),
+                        lambda url: _Response(url, _players(9)),
+                    ]
+                ),
+                clock,
+                max_requests=2,
+                profile="training",
+                continue_on_quality_error=True,
+                quarantine_incomplete=True,
+            )
+
+            self.assertIsNone(result["stopped_reason"])
+            self.assertIn("game_players:quarantined", result["task_counts"])
+            self.assertNotIn("game_players:retry", result["task_counts"])
+            replay = self._capture(
+                root,
+                _Opener([]),
+                clock,
+                max_requests=1,
+                profile="training",
+                quarantine_incomplete=True,
+            )
+            self.assertEqual(0, replay["requests_this_run"])
+
+    def test_unattended_mode_leaves_network_failure_for_later(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            result = self._capture(
+                root,
+                _Opener([URLError("temporary disconnect")]),
+                clock,
+                max_requests=1,
+                continue_on_network_error=True,
+            )
+
+            self.assertIsNone(result["stopped_reason"])
+            self.assertIn("catalog:retry", result["task_counts"])
 
     def test_parallel_workers_share_one_persisted_start_rate_limit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

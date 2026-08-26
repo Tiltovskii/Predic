@@ -155,6 +155,8 @@ predic-data capture-bo3-json \
   --page-limit 100 \
   --profile core \
   --continue-on-quality-error \
+  --continue-on-network-error \
+  --quarantine-incomplete-player-stats \
   --workers 3 \
   --max-requests 100
 ```
@@ -172,6 +174,13 @@ the audit gap and does not override host circuits, `429`, or network stops.
 `--workers` overlaps slow responses while every request start still passes
 through the one persisted host rate limiter. SQLite state transitions and raw
 snapshot commits remain serialized in the main thread.
+For a closed historical first pass, `--quarantine-incomplete-player-stats`
+stores an empty/partial player payload and its exact quality error once instead
+of repeatedly fetching deterministic source gaps. Existing HTTP-200 quality
+retries are migrated to quarantine without another request. A later repair pass
+can explicitly revisit those tasks. `--continue-on-network-error` keeps other
+tasks moving after transient connection failures; host circuits and `429`
+remain hard stops.
 
 The catalog is split into closed half-open date windows. The first page records
 `total.count`; every expected offset must be captured, and the number of unique

@@ -1551,6 +1551,7 @@ def _quality_finish(
     headers: Mapping[str, str],
     body: bytes,
     output_dir: Path,
+    quarantine_incomplete: bool = False,
 ) -> tuple[bool, str | None]:
     content_type = headers.get("content-type", "")
     if "json" not in content_type.casefold():
@@ -1617,7 +1618,7 @@ def _quality_finish(
         if complete:
             task_status = "complete"
             next_at = None
-        elif attempts >= policy.max_attempts_per_url:
+        elif quarantine_incomplete or attempts >= policy.max_attempts_per_url:
             task_status = "quarantined"
             next_at = None
         else:
@@ -1730,6 +1731,8 @@ def _capture_parallel(
     timeout_seconds: float,
     workers: int,
     continue_on_quality_error: bool,
+    continue_on_network_error: bool,
+    quarantine_incomplete: bool,
     opener: Any | None,
     now_fn: Callable[[], datetime],
     sleep_fn: Callable[[float], None],
@@ -1800,6 +1803,7 @@ def _capture_parallel(
                         headers=response.headers,
                         body=response.body,
                         output_dir=output_path,
+                        quarantine_incomplete=quarantine_incomplete,
                     )
                     if not complete and not continue_on_quality_error:
                         stop("quality_retry")
@@ -1827,7 +1831,7 @@ def _capture_parallel(
                         policy=policy,
                         now=now_fn().astimezone(timezone.utc),
                     )
-                    if status == "retry":
+                    if status == "retry" and not continue_on_network_error:
                         stop("network_retry")
                 except (
                     Bo3QualityError,
@@ -1886,6 +1890,8 @@ def capture_bo3(
     max_requests: int | None = None,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     continue_on_quality_error: bool = False,
+    continue_on_network_error: bool = False,
+    quarantine_incomplete: bool = False,
     workers: int = 1,
     opener: OpenerDirector | Any | None = None,
     now_fn: Callable[[], datetime] = _utc_now,
@@ -1957,6 +1963,18 @@ def capture_bo3(
                 """,
                 (stream,),
             )
+            if quarantine_incomplete:
+                connection.execute(
+                    """
+                    UPDATE bo3_task
+                    SET status = 'quarantined', next_eligible_at = NULL,
+                        updated_at = ?
+                    WHERE stream = ? AND kind = 'game_players'
+                      AND status = 'retry' AND last_status_code = 200
+                      AND last_error IS NOT NULL
+                    """,
+                    (_iso(now_fn()), stream),
+                )
         if workers > 1:
             requests, stopped_reason = _capture_parallel(
                 connection,
@@ -1967,6 +1985,8 @@ def capture_bo3(
                 timeout_seconds=timeout_seconds,
                 workers=workers,
                 continue_on_quality_error=continue_on_quality_error,
+                continue_on_network_error=continue_on_network_error,
+                quarantine_incomplete=quarantine_incomplete,
                 opener=opener,
                 now_fn=now_fn,
                 sleep_fn=sleep_fn,
@@ -2029,6 +2049,7 @@ def capture_bo3(
                     headers=headers,
                     body=body,
                     output_dir=output_path,
+                    quarantine_incomplete=quarantine_incomplete,
                 )
                 if not complete:
                     if not continue_on_quality_error:
@@ -2062,7 +2083,7 @@ def capture_bo3(
                     policy=policy,
                     now=now_fn().astimezone(timezone.utc),
                 )
-                if status == "retry":
+                if status == "retry" and not continue_on_network_error:
                     stopped_reason = "network_retry"
                     break
             except (Bo3QualityError, ResponseTooLargeError, ResponseLengthMismatchError) as error:
