@@ -155,6 +155,7 @@ predic-data capture-bo3-json \
   --page-limit 100 \
   --profile core \
   --continue-on-quality-error \
+  --workers 3 \
   --max-requests 100
 ```
 
@@ -168,6 +169,9 @@ and newly discovered child tasks are committed.
 For a long unattended pass, `--continue-on-quality-error` leaves incomplete
 payloads in retry/quarantine and continues unrelated work. It never suppresses
 the audit gap and does not override host circuits, `429`, or network stops.
+`--workers` overlaps slow responses while every request start still passes
+through the one persisted host rate limiter. SQLite state transitions and raw
+snapshot commits remain serialized in the main thread.
 
 The catalog is split into closed half-open date windows. The first page records
 `total.count`; every expected offset must be captured, and the number of unique

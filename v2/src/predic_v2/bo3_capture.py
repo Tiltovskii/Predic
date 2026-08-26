@@ -7,6 +7,7 @@ import os
 import sqlite3
 import time
 from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -87,6 +88,14 @@ class _Task:
     url: str
     attempts: int
     metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _FetchedResponse:
+    status_code: int
+    final_url: str
+    headers: dict[str, str]
+    body: bytes
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):
@@ -837,6 +846,36 @@ def _request_json(opener: Any, url: str, policy: CapturePolicy, timeout: float) 
         },
     )
     return opener.open(request, timeout=timeout)
+
+
+def _fetch_json_response(
+    opener: Any | None,
+    url: str,
+    policy: CapturePolicy,
+    timeout: float,
+) -> _FetchedResponse:
+    request_opener = opener or build_opener(_NoRedirectHandler())
+    response = _request_json(request_opener, url, policy, timeout)
+    try:
+        status_code = int(response.getcode())
+        final_url = str(response.geturl())
+        policy.validate_url(final_url)
+        headers = _safe_headers(response.headers)
+        if status_code != 200:
+            raise HTTPError(
+                final_url, status_code, "unexpected status", response.headers, None
+            )
+        body = _read_limited(response, policy.max_response_bytes)
+        return _FetchedResponse(
+            status_code=status_code,
+            final_url=final_url,
+            headers=headers,
+            body=body,
+        )
+    finally:
+        close = getattr(response, "close", None)
+        if callable(close):
+            close()
 
 
 def _select_task(
@@ -1681,6 +1720,157 @@ def _finish_http_error(
     return task_status
 
 
+def _capture_parallel(
+    connection: sqlite3.Connection,
+    *,
+    stream: str,
+    output_path: Path,
+    policy: CapturePolicy,
+    max_requests: int,
+    timeout_seconds: float,
+    workers: int,
+    continue_on_quality_error: bool,
+    opener: Any | None,
+    now_fn: Callable[[], datetime],
+    sleep_fn: Callable[[float], None],
+) -> tuple[int, str | None]:
+    requests = 0
+    stopped_reason: str | None = None
+    stop_scheduling = False
+    inflight: dict[Future[_FetchedResponse], tuple[_Task, int, datetime]] = {}
+
+    def stop(reason: str) -> None:
+        nonlocal stopped_reason, stop_scheduling
+        if stopped_reason is None:
+            stopped_reason = reason
+        stop_scheduling = True
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="bo3-http") as pool:
+        while True:
+            while (
+                not stop_scheduling
+                and requests < max_requests
+                and len(inflight) < workers
+            ):
+                now = now_fn().astimezone(timezone.utc)
+                task = _select_task(connection, stream, now)
+                if task is None:
+                    break
+                policy.validate_url(task.url)
+                try:
+                    request_at = _wait_for_slot(
+                        connection,
+                        _authority(task.url),
+                        policy.min_interval_seconds,
+                        now_fn=now_fn,
+                        sleep_fn=sleep_fn,
+                    )
+                    policy.assert_authorization_active(request_at)
+                except (Bo3HostCircuitOpenError, AuthorizationWindowError) as error:
+                    stop(str(error))
+                    break
+                attempts = _start_task(connection, task, request_at)
+                future = pool.submit(
+                    _fetch_json_response,
+                    opener,
+                    task.url,
+                    policy,
+                    timeout_seconds,
+                )
+                inflight[future] = (task, attempts, request_at)
+                requests += 1
+
+            if not inflight:
+                break
+
+            completed, _ = wait(tuple(inflight), return_when=FIRST_COMPLETED)
+            for future in completed:
+                task, attempts, request_at = inflight.pop(future)
+                try:
+                    response = future.result()
+                    complete, _ = _quality_finish(
+                        connection,
+                        task,
+                        attempts=attempts,
+                        policy=policy,
+                        observed_at=request_at,
+                        source_url=task.url,
+                        final_url=response.final_url,
+                        status_code=response.status_code,
+                        headers=response.headers,
+                        body=response.body,
+                        output_dir=output_path,
+                    )
+                    if not complete and not continue_on_quality_error:
+                        stop("quality_retry")
+                except HTTPError as error:
+                    status = _finish_http_error(
+                        connection,
+                        task,
+                        attempts=attempts,
+                        status_code=int(error.code),
+                        error=f"HTTP {error.code}: {error.reason}",
+                        headers=error.headers,
+                        policy=policy,
+                        now=now_fn().astimezone(timezone.utc),
+                    )
+                    if status == "retry" or int(error.code) in PERMANENT_BLOCK_CODES:
+                        stop(f"http_{error.code}")
+                except (URLError, TimeoutError, OSError) as error:
+                    status = _finish_http_error(
+                        connection,
+                        task,
+                        attempts=attempts,
+                        status_code=None,
+                        error=f"{type(error).__name__}: {error}",
+                        headers={},
+                        policy=policy,
+                        now=now_fn().astimezone(timezone.utc),
+                    )
+                    if status == "retry":
+                        stop("network_retry")
+                except (
+                    Bo3QualityError,
+                    ResponseTooLargeError,
+                    ResponseLengthMismatchError,
+                ) as error:
+                    status = _finish_http_error(
+                        connection,
+                        task,
+                        attempts=attempts,
+                        status_code=None,
+                        error=f"{type(error).__name__}: {error}",
+                        headers={},
+                        policy=policy,
+                        now=now_fn().astimezone(timezone.utc),
+                    )
+                    if status == "retry" and not continue_on_quality_error:
+                        stop("quality_retry")
+                except Bo3StorageError as error:
+                    with connection:
+                        connection.execute(
+                            """
+                            UPDATE bo3_task
+                            SET status = 'quarantined', last_error = ?, updated_at = ?
+                            WHERE stream = ? AND task_key = ?
+                            """,
+                            (
+                                f"{type(error).__name__}: {error}",
+                                _iso(now_fn()),
+                                task.stream,
+                                task.task_key,
+                            ),
+                        )
+                    stop("storage_error")
+
+            if stop_scheduling and not inflight:
+                break
+            if requests >= max_requests and not inflight:
+                break
+
+    return requests, stopped_reason
+
+
 def capture_bo3(
     state_db: str | Path,
     output_dir: str | Path,
@@ -1696,6 +1886,7 @@ def capture_bo3(
     max_requests: int | None = None,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     continue_on_quality_error: bool = False,
+    workers: int = 1,
     opener: OpenerDirector | Any | None = None,
     now_fn: Callable[[], datetime] = _utc_now,
     sleep_fn: Callable[[float], None] = time.sleep,
@@ -1723,6 +1914,8 @@ def capture_bo3(
         )
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
+    if workers < 1 or workers > 16:
+        raise ValueError("workers must be between 1 and 16")
     for url in (
         _catalog_url(
             start_date,
@@ -1764,6 +1957,30 @@ def capture_bo3(
                 """,
                 (stream,),
             )
+        if workers > 1:
+            requests, stopped_reason = _capture_parallel(
+                connection,
+                stream=stream,
+                output_path=output_path,
+                policy=policy,
+                max_requests=max_requests,
+                timeout_seconds=timeout_seconds,
+                workers=workers,
+                continue_on_quality_error=continue_on_quality_error,
+                opener=opener,
+                now_fn=now_fn,
+                sleep_fn=sleep_fn,
+            )
+            result = audit_bo3_capture(state_path, stream=stream)
+            result.update(
+                {
+                    "requests_this_run": requests,
+                    "stopped_reason": stopped_reason,
+                    "stream": stream,
+                    "workers": workers,
+                }
+            )
+            return result
         request_opener = opener or build_opener(_NoRedirectHandler())
         while requests < max_requests:
             now = now_fn().astimezone(timezone.utc)
@@ -1886,6 +2103,7 @@ def capture_bo3(
                 "requests_this_run": requests,
                 "stopped_reason": stopped_reason,
                 "stream": stream,
+                "workers": workers,
             }
         )
         return result

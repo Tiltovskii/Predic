@@ -274,6 +274,12 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="keep crawling while incomplete payloads remain queued for retry/audit",
     )
+    capture_bo3_parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="parallel HTTP workers sharing the persisted global rate limit",
+    )
 
     audit_bo3_parser = subparsers.add_parser(
         "audit-bo3-capture",
@@ -484,6 +490,7 @@ def main() -> None:
             max_requests=args.max_requests,
             timeout_seconds=args.timeout_seconds,
             continue_on_quality_error=args.continue_on_quality_error,
+            workers=args.workers,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         if result["stopped_reason"]:

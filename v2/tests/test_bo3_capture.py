@@ -342,6 +342,41 @@ class Bo3CaptureTest(unittest.TestCase):
             self.assertIn("game_players:retry", result["task_counts"])
             self.assertEqual(1, result["gaps"]["finished_game_player_gap_count"])
 
+    def test_parallel_workers_share_one_persisted_start_rate_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            empty_catalog = {
+                "total": {"count": 0, "pages": 1, "offset": 0, "limit": 100},
+                "results": [],
+            }
+            result = capture_bo3(
+                root / "state.sqlite3",
+                root / "raw",
+                stream="parallel-catalog",
+                policy_path=self._policy(root),
+                start_date=date(2020, 6, 15),
+                end_date=date(2020, 6, 18),
+                window_days=1,
+                profile="catalog",
+                max_requests=3,
+                workers=3,
+                opener=_Opener(
+                    [
+                        lambda url: _Response(url, empty_catalog),
+                        lambda url: _Response(url, empty_catalog),
+                        lambda url: _Response(url, empty_catalog),
+                    ]
+                ),
+                now_fn=clock.now,
+                sleep_fn=clock.sleep,
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(3, result["requests_this_run"])
+            self.assertEqual(3, result["workers"])
+            self.assertEqual([1.0, 1.0], clock.sleeps)
+
     def test_partial_request_budget_resumes_from_child_task(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
