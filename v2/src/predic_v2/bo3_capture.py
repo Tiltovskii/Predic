@@ -31,6 +31,7 @@ from .hltv_capture import (
 
 
 CAPTURE_VERSION = "bo3-api-capture-v1"
+PLAYER_NORMALIZER_VERSION = "bo3-player-normalizer-v2"
 API_ROOT = "https://api.bo3.gg/api/v1"
 DEFAULT_TIMEOUT_SECONDS = 30.0
 PROFILE_LEVEL = {
@@ -57,6 +58,10 @@ TASK_PRIORITY = {
 PERMANENT_BLOCK_CODES = {401, 403, 406, 418, 451}
 RETRYABLE_CODES = {408, 425, 429, 500, 502, 503, 504}
 CORE_PLAYER_FIELDS = ("kills", "death", "assists", "damage", "adr", "kast")
+# KAST is useful but structurally absent in a sizeable part of the historical
+# API.  It must be masked, not imputed and not used to reject an otherwise
+# usable player-map row.
+TRAINING_PLAYER_FIELDS = ("kills", "death", "assists", "damage", "adr")
 
 
 class Bo3CaptureError(RuntimeError):
@@ -225,6 +230,11 @@ CREATE TABLE IF NOT EXISTS bo3_game_index (
     distinct_players INTEGER,
     distinct_teams INTEGER,
     players_complete INTEGER NOT NULL DEFAULT 0,
+    lineup_complete INTEGER NOT NULL DEFAULT 0,
+    player_quality_class TEXT,
+    missing_metric_rows INTEGER NOT NULL DEFAULT 0,
+    kast_missing_rows INTEGER NOT NULL DEFAULT 0,
+    anomalous_player_rows INTEGER NOT NULL DEFAULT 0,
     player_quality_error TEXT,
     last_snapshot_id TEXT NOT NULL,
     PRIMARY KEY (stream, game_id),
@@ -241,7 +251,16 @@ CREATE TABLE IF NOT EXISTS bo3_player_map_index (
     steam_id_64 TEXT,
     team_id INTEGER NOT NULL,
     nickname TEXT,
+    current_is_coach INTEGER,
     metrics_complete INTEGER NOT NULL,
+    training_metrics_complete INTEGER NOT NULL DEFAULT 0,
+    rounds_participated INTEGER,
+    first_round INTEGER,
+    last_round INTEGER,
+    participation_fraction REAL,
+    participation_rounds_json TEXT NOT NULL DEFAULT '[]',
+    missing_metrics_json TEXT NOT NULL DEFAULT '[]',
+    anomaly_flags_json TEXT NOT NULL DEFAULT '[]',
     snapshot_id TEXT NOT NULL,
     PRIMARY KEY (stream, game_id, steam_profile_id),
     FOREIGN KEY (stream, game_id) REFERENCES bo3_game_index(stream, game_id),
@@ -298,11 +317,11 @@ def _connect_state(path: Path) -> sqlite3.Connection:
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA journal_mode = WAL")
     connection.executescript(_STATE_SCHEMA)
-    columns = {
+    game_columns = {
         str(row[1])
         for row in connection.execute("PRAGMA table_info(bo3_game_index)")
     }
-    if "stats_expected" not in columns:
+    if "stats_expected" not in game_columns:
         connection.execute(
             "ALTER TABLE bo3_game_index "
             "ADD COLUMN stats_expected INTEGER NOT NULL DEFAULT 0"
@@ -313,9 +332,41 @@ def _connect_state(path: Path) -> sqlite3.Connection:
             SET stats_expected = CASE WHEN map_name IS NOT NULL THEN 1 ELSE 0 END
             """
         )
+    game_migrations = {
+        "lineup_complete": "INTEGER NOT NULL DEFAULT 0",
+        "player_quality_class": "TEXT",
+        "missing_metric_rows": "INTEGER NOT NULL DEFAULT 0",
+        "kast_missing_rows": "INTEGER NOT NULL DEFAULT 0",
+        "anomalous_player_rows": "INTEGER NOT NULL DEFAULT 0",
+    }
+    for name, definition in game_migrations.items():
+        if name not in game_columns:
+            connection.execute(
+                f"ALTER TABLE bo3_game_index ADD COLUMN {name} {definition}"
+            )
+    player_columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(bo3_player_map_index)")
+    }
+    player_migrations = {
+        "current_is_coach": "INTEGER",
+        "training_metrics_complete": "INTEGER NOT NULL DEFAULT 0",
+        "rounds_participated": "INTEGER",
+        "first_round": "INTEGER",
+        "last_round": "INTEGER",
+        "participation_fraction": "REAL",
+        "participation_rounds_json": "TEXT NOT NULL DEFAULT '[]'",
+        "missing_metrics_json": "TEXT NOT NULL DEFAULT '[]'",
+        "anomaly_flags_json": "TEXT NOT NULL DEFAULT '[]'",
+    }
+    for name, definition in player_migrations.items():
+        if name not in player_columns:
+            connection.execute(
+                f"ALTER TABLE bo3_player_map_index ADD COLUMN {name} {definition}"
+            )
     connection.execute(
         """
-        INSERT INTO bo3_state_meta (key, value) VALUES ('schema_version', '1')
+        INSERT INTO bo3_state_meta (key, value) VALUES ('schema_version', '2')
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
         """
     )
@@ -1405,7 +1456,34 @@ def _process_game(
             )
 
 
-def _player_identity(row: dict[str, Any]) -> tuple[int, int, str | None, str | None, bool]:
+def _player_round_participation(
+    profile: dict[str, Any],
+) -> tuple[list[int] | None, list[str]]:
+    if "game_round_steam_profiles" not in profile:
+        return None, []
+    raw_rounds = profile.get("game_round_steam_profiles")
+    if not isinstance(raw_rounds, list):
+        return None, ["invalid_round_participation"]
+    rounds: list[int] = []
+    invalid = False
+    for item in raw_rounds:
+        if not isinstance(item, dict):
+            invalid = True
+            continue
+        value = item.get("round_number")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            invalid = True
+            continue
+        rounds.append(value)
+    flags: list[str] = []
+    if invalid:
+        flags.append("invalid_round_participation")
+    if len(rounds) != len(set(rounds)):
+        flags.append("duplicate_round_participation")
+    return sorted(set(rounds)), flags
+
+
+def _player_identity(row: dict[str, Any]) -> dict[str, Any]:
     profile_id = _integer(row.get("steam_profile_id"), "player.steam_profile_id")
     clan = row.get("team_clan")
     if not isinstance(clan, dict):
@@ -1420,8 +1498,44 @@ def _player_identity(row: dict[str, Any]) -> tuple[int, int, str | None, str | N
     nickname = profile.get("nickname")
     if nickname is not None and not isinstance(nickname, str):
         raise Bo3QualityError("player nickname must be a string or null")
-    metrics_complete = all(row.get(field) is not None for field in CORE_PLAYER_FIELDS)
-    return profile_id, team_id, steam_id, nickname, metrics_complete
+    missing_metrics = [field for field in CORE_PLAYER_FIELDS if row.get(field) is None]
+    anomaly_flags: list[str] = []
+    for field in CORE_PLAYER_FIELDS:
+        value = row.get(field)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            anomaly_flags.append(f"{field}_not_numeric")
+        elif not math.isfinite(float(value)):
+            anomaly_flags.append(f"{field}_not_finite")
+        elif float(value) < 0:
+            anomaly_flags.append(f"{field}_negative")
+    participation_rounds, participation_flags = _player_round_participation(profile)
+    anomaly_flags.extend(participation_flags)
+    current_is_coach: bool | None = None
+    player = profile.get("player")
+    if isinstance(player, dict) and "is_coach" in player:
+        raw_is_coach = player.get("is_coach")
+        if isinstance(raw_is_coach, bool):
+            current_is_coach = raw_is_coach
+        elif raw_is_coach is not None:
+            anomaly_flags.append("current_is_coach_not_boolean")
+    return {
+        "profile_id": profile_id,
+        "team_id": team_id,
+        "steam_id": steam_id,
+        "nickname": nickname,
+        # This is the profile's current entity status, not a historical match
+        # role.  It is retained as context and never used to drop a participant.
+        "current_is_coach": current_is_coach,
+        "metrics_complete": not missing_metrics,
+        "training_metrics_complete": not any(
+            field in missing_metrics for field in TRAINING_PLAYER_FIELDS
+        ),
+        "missing_metrics": missing_metrics,
+        "anomaly_flags": sorted(set(anomaly_flags)),
+        "participation_rounds": participation_rounds,
+    }
 
 
 def _process_game_players(
@@ -1432,26 +1546,85 @@ def _process_game_players(
 ) -> None:
     if not isinstance(payload, list):
         raise Bo3QualityError("game players response must be an array")
+    game_id = int(task.metadata["game_id"])
     if not payload:
+        connection.execute(
+            "DELETE FROM bo3_player_map_index WHERE stream = ? AND game_id = ?",
+            (task.stream, game_id),
+        )
+        connection.execute(
+            """
+            UPDATE bo3_game_index
+            SET player_rows = 0, distinct_players = 0, distinct_teams = 0,
+                players_complete = 0, lineup_complete = 0,
+                player_quality_class = 'empty', missing_metric_rows = 0,
+                kast_missing_rows = 0, anomalous_player_rows = 0,
+                player_quality_error = 'game players response is empty',
+                last_snapshot_id = ?
+            WHERE stream = ? AND game_id = ?
+            """,
+            (snapshot_id, task.stream, game_id),
+        )
         raise Bo3QualityError("game players response is empty")
-    identities: list[tuple[int, int, str | None, str | None, bool]] = []
+    identities: list[dict[str, Any]] = []
     for item in payload:
         if not isinstance(item, dict):
             raise Bo3QualityError("game players entries must be objects")
         identities.append(_player_identity(item))
-    profile_ids = [item[0] for item in identities]
+    profile_ids = [int(item["profile_id"]) for item in identities]
     if len(set(profile_ids)) != len(profile_ids):
         raise Bo3QualityError("game players response has duplicate steam_profile_id")
-    team_counts = Counter(item[1] for item in identities)
-    metrics_complete = all(item[4] for item in identities)
-    quality_errors: list[str] = []
-    if len(identities) != 10:
-        quality_errors.append(f"expected 10 player rows, got {len(identities)}")
-    if sorted(team_counts.values()) != [5, 5]:
-        quality_errors.append(f"expected two teams of five, got {dict(team_counts)}")
-    if not metrics_complete:
-        quality_errors.append("one or more player rows miss core metrics")
-    game_id = int(task.metadata["game_id"])
+    team_counts = Counter(int(item["team_id"]) for item in identities)
+    team_shape = sorted(team_counts.values())
+    if team_shape == [5, 5]:
+        quality_class = "complete_5v5"
+    elif len(team_shape) == 2 and min(team_shape) >= 5:
+        quality_class = "substitution"
+    elif len(team_shape) == 2:
+        quality_class = "partial_roster"
+    else:
+        quality_class = "anomalous"
+    lineup_complete = quality_class in {"complete_5v5", "substitution"}
+    missing_metric_rows = sum(bool(item["missing_metrics"]) for item in identities)
+    kast_missing_rows = sum(
+        "kast" in item["missing_metrics"] for item in identities
+    )
+    training_metrics_complete = all(
+        bool(item["training_metrics_complete"]) for item in identities
+    )
+    anomalous_player_rows = sum(bool(item["anomaly_flags"]) for item in identities)
+    quality_warnings: list[str] = []
+    if not lineup_complete:
+        quality_warnings.append(
+            f"incomplete lineup: {len(identities)} rows across teams {dict(team_counts)}"
+        )
+    if not training_metrics_complete:
+        quality_warnings.append("one or more player rows miss training metrics")
+    if kast_missing_rows:
+        quality_warnings.append(f"KAST missing for {kast_missing_rows} player rows")
+    if anomalous_player_rows:
+        quality_warnings.append(
+            f"anomaly flags present for {anomalous_player_rows} player rows"
+        )
+    game_rounds_row = connection.execute(
+        "SELECT rounds_count FROM bo3_game_index WHERE stream = ? AND game_id = ?",
+        (task.stream, game_id),
+    ).fetchone()
+    game_rounds = (
+        int(game_rounds_row[0])
+        if game_rounds_row is not None and game_rounds_row[0] is not None
+        else None
+    )
+    observed_last_round = max(
+        (
+            max(item["participation_rounds"])
+            for item in identities
+            if item["participation_rounds"]
+        ),
+        default=None,
+    )
+    if observed_last_round is not None:
+        game_rounds = max(game_rounds or 0, observed_last_round)
     connection.execute(
         "DELETE FROM bo3_player_map_index WHERE stream = ? AND game_id = ?",
         (task.stream, game_id),
@@ -1460,44 +1633,79 @@ def _process_game_players(
         """
         INSERT INTO bo3_player_map_index (
             stream, game_id, steam_profile_id, steam_id_64, team_id,
-            nickname, metrics_complete, snapshot_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            nickname, current_is_coach, metrics_complete,
+            training_metrics_complete,
+            rounds_participated, first_round, last_round, participation_fraction,
+            participation_rounds_json, missing_metrics_json, anomaly_flags_json,
+            snapshot_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
                 task.stream,
                 game_id,
-                profile_id,
-                steam_id,
-                team_id,
-                nickname,
-                int(complete),
+                item["profile_id"],
+                item["steam_id"],
+                item["team_id"],
+                item["nickname"],
+                (
+                    int(item["current_is_coach"])
+                    if item["current_is_coach"] is not None
+                    else None
+                ),
+                int(bool(item["metrics_complete"])),
+                int(bool(item["training_metrics_complete"])),
+                len(item["participation_rounds"])
+                if item["participation_rounds"] is not None
+                else None,
+                min(item["participation_rounds"])
+                if item["participation_rounds"]
+                else None,
+                max(item["participation_rounds"])
+                if item["participation_rounds"]
+                else None,
+                (
+                    len(item["participation_rounds"]) / game_rounds
+                    if item["participation_rounds"] is not None
+                    and game_rounds is not None
+                    and game_rounds > 0
+                    else None
+                ),
+                json.dumps(item["participation_rounds"] or [], separators=(",", ":")),
+                json.dumps(item["missing_metrics"], separators=(",", ":")),
+                json.dumps(item["anomaly_flags"], separators=(",", ":")),
                 snapshot_id,
             )
-            for profile_id, team_id, steam_id, nickname, complete in identities
+            for item in identities
         ],
     )
-    error_text = "; ".join(quality_errors) if quality_errors else None
+    warning_text = "; ".join(quality_warnings) if quality_warnings else None
     connection.execute(
         """
         UPDATE bo3_game_index
         SET player_rows = ?, distinct_players = ?, distinct_teams = ?,
-            players_complete = ?, player_quality_error = ?, last_snapshot_id = ?
+            players_complete = ?, lineup_complete = ?, player_quality_class = ?,
+            missing_metric_rows = ?, kast_missing_rows = ?,
+            anomalous_player_rows = ?, player_quality_error = ?,
+            last_snapshot_id = ?
         WHERE stream = ? AND game_id = ?
         """,
         (
             len(identities),
             len(set(profile_ids)),
             len(team_counts),
-            int(not quality_errors),
-            error_text,
+            int(lineup_complete and training_metrics_complete),
+            int(lineup_complete),
+            quality_class,
+            missing_metric_rows,
+            kast_missing_rows,
+            anomalous_player_rows,
+            warning_text,
             snapshot_id,
             task.stream,
             game_id,
         ),
     )
-    if quality_errors:
-        raise Bo3QualityError(error_text or "incomplete player map")
 
 
 def _process_generic_enrichment(task: _Task, payload: Any) -> None:
@@ -2134,6 +2342,176 @@ def capture_bo3(
         _release_lock(lock)
 
 
+def reprocess_bo3_player_snapshots(
+    state_db: str | Path,
+    *,
+    stream: str,
+    after_game_id: int | None = None,
+    max_games: int | None = None,
+    now_fn: Callable[[], datetime] = _utc_now,
+) -> dict[str, object]:
+    """Rebuild player-map indexes from the latest durable raw JSON snapshots.
+
+    This is intentionally offline: it takes the same exclusive state lock as a
+    live capture, verifies every content-addressed object, and never performs a
+    network request or modifies a raw object.
+    """
+
+    if after_game_id is not None and after_game_id < 0:
+        raise ValueError("after_game_id must be non-negative")
+    if max_games is not None and max_games < 1:
+        raise ValueError("max_games must be positive")
+    state_path = Path(state_db).resolve()
+    lock = _acquire_lock(state_path)
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = _connect_state(state_path)
+        job = connection.execute(
+            "SELECT output_dir FROM bo3_capture_job WHERE stream = ?", (stream,)
+        ).fetchone()
+        if job is None:
+            raise ValueError(f"unknown BO3 stream: {stream}")
+        output_dir = Path(str(job["output_dir"])).resolve()
+        parameters: list[object] = [stream]
+        after_clause = ""
+        if after_game_id is not None:
+            after_clause = "AND CAST(t.source_id AS INTEGER) > ?"
+            parameters.append(after_game_id)
+        limit_clause = ""
+        if max_games is not None:
+            limit_clause = "LIMIT ?"
+            parameters.append(max_games)
+        rows = connection.execute(
+            f"""
+            SELECT * FROM (
+                SELECT s.snapshot_id, s.content_sha256, s.object_path,
+                       t.stream, t.task_key, t.kind, t.source_id, t.url,
+                       t.attempts, t.metadata_json,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY t.stream, t.task_key
+                           ORDER BY s.observed_at DESC, s.snapshot_id DESC
+                       ) AS recency
+                FROM bo3_task AS t
+                JOIN bo3_snapshot AS s
+                  ON s.stream = t.stream AND s.task_key = t.task_key
+                WHERE t.stream = ? AND t.kind = 'game_players'
+                  {after_clause}
+            )
+            WHERE recency = 1
+            ORDER BY CAST(source_id AS INTEGER)
+            {limit_clause}
+            """,
+            parameters,
+        ).fetchall()
+        processed = 0
+        accepted = 0
+        quarantined = 0
+        quality_counts: Counter[str] = Counter()
+        last_game_id: int | None = None
+        for row in rows:
+            game_id = int(row["source_id"])
+            object_path = output_dir / str(row["object_path"])
+            if not object_path.is_file():
+                raise Bo3StorageError(f"missing raw object for game {game_id}: {object_path}")
+            actual_hash = _sha256_file(object_path)
+            if actual_hash != str(row["content_sha256"]):
+                raise Bo3StorageError(
+                    f"raw object hash mismatch for game {game_id}: "
+                    f"expected {row['content_sha256']}, got {actual_hash}"
+                )
+            try:
+                payload = json.loads(object_path.read_bytes())
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise Bo3StorageError(
+                    f"cannot read raw object for game {game_id}: {error}"
+                ) from error
+            task = _Task(
+                stream=str(row["stream"]),
+                task_key=str(row["task_key"]),
+                kind=str(row["kind"]),
+                source_id=str(row["source_id"]),
+                url=str(row["url"]),
+                attempts=int(row["attempts"]),
+                metadata=json.loads(str(row["metadata_json"])),
+            )
+            quality_error: str | None = None
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                try:
+                    _process_game_players(
+                        connection, task, payload, str(row["snapshot_id"])
+                    )
+                except Bo3QualityError as error:
+                    quality_error = str(error)
+                new_status = "quarantined" if quality_error else "complete"
+                connection.execute(
+                    """
+                    UPDATE bo3_snapshot
+                    SET quality_status = ?, quality_error = ?
+                    WHERE snapshot_id = ?
+                    """,
+                    (
+                        "incomplete" if quality_error else "complete",
+                        quality_error,
+                        row["snapshot_id"],
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE bo3_task
+                    SET status = ?, next_eligible_at = NULL, last_error = ?,
+                        updated_at = ?
+                    WHERE stream = ? AND task_key = ?
+                    """,
+                    (
+                        new_status,
+                        quality_error,
+                        _iso(now_fn()),
+                        stream,
+                        row["task_key"],
+                    ),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+            game = connection.execute(
+                """
+                SELECT player_quality_class
+                FROM bo3_game_index WHERE stream = ? AND game_id = ?
+                """,
+                (stream, game_id),
+            ).fetchone()
+            quality_counts[str(game[0] if game and game[0] else "unclassified")] += 1
+            processed += 1
+            accepted += int(quality_error is None)
+            quarantined += int(quality_error is not None)
+            last_game_id = game_id
+        with connection:
+            connection.execute(
+                """
+                INSERT INTO bo3_state_meta (key, value)
+                VALUES ('player_normalizer_version', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (PLAYER_NORMALIZER_VERSION,),
+            )
+        return {
+            "accepted": accepted,
+            "last_game_id": last_game_id,
+            "normalizer_version": PLAYER_NORMALIZER_VERSION,
+            "processed": processed,
+            "quality_classes": dict(sorted(quality_counts.items())),
+            "quarantined": quarantined,
+            "raw_objects_modified": 0,
+            "stream": stream,
+        }
+    finally:
+        if connection is not None:
+            connection.close()
+        _release_lock(lock)
+
+
 def audit_bo3_capture(
     state_db: str | Path, *, stream: str, max_samples: int = 20
 ) -> dict[str, object]:
@@ -2191,7 +2569,10 @@ def audit_bo3_capture(
             """
             SELECT g.game_id, g.match_id, g.map_name, g.rounds_count,
                    g.game_detail_complete, g.player_rows, g.distinct_players,
-                   g.distinct_teams, g.players_complete, g.player_quality_error
+                   g.distinct_teams, g.players_complete, g.lineup_complete,
+                   g.player_quality_class, g.missing_metric_rows,
+                   g.kast_missing_rows, g.anomalous_player_rows,
+                   g.player_quality_error
             FROM bo3_game_index AS g
             JOIN bo3_match_index AS m
               ON m.stream = g.stream AND m.match_id = g.match_id
@@ -2201,8 +2582,6 @@ def audit_bo3_capture(
                   g.map_name IS NULL
                   OR (? = 1 AND g.game_detail_complete = 0)
                   OR g.players_complete = 0
-                  OR g.player_rows <> 10 OR g.distinct_players <> 10
-                  OR g.distinct_teams <> 2
               )
             ORDER BY m.start_date, g.match_id, g.map_number
             LIMIT ?
@@ -2245,6 +2624,19 @@ def audit_bo3_capture(
             """,
             (stream, stream, stream, stream, stream, stream),
         ).fetchone()
+        quality_classes = {
+            str(row["player_quality_class"] or "unclassified"): int(row["count"])
+            for row in connection.execute(
+                """
+                SELECT player_quality_class, COUNT(*) AS count
+                FROM bo3_game_index
+                WHERE stream = ? AND stats_expected = 1
+                GROUP BY player_quality_class
+                ORDER BY player_quality_class
+                """,
+                (stream,),
+            )
+        }
         gaps = {
             "incomplete_window_count": sum(
                 1
@@ -2258,17 +2650,23 @@ def audit_bo3_capture(
                     """
                     SELECT COUNT(*)
                     FROM bo3_game_index AS g
-                    JOIN bo3_match_index AS m
-                      ON m.stream = g.stream AND m.match_id = g.match_id
                     WHERE g.stream = ?
                       AND g.stats_expected = 1
                       AND (
                           g.map_name IS NULL
-                          OR (? = 1 AND g.game_detail_complete = 0)
                           OR g.players_complete = 0
-                          OR g.player_rows <> 10 OR g.distinct_players <> 10
-                          OR g.distinct_teams <> 2
                       )
+                    """,
+                    (stream,),
+                ).fetchone()[0]
+            ),
+            "finished_game_detail_gap_count": int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM bo3_game_index
+                    WHERE stream = ? AND stats_expected = 1
+                      AND ? = 1 AND game_detail_complete = 0
                     """,
                     (stream, requires_game_detail),
                 ).fetchone()[0]
@@ -2322,6 +2720,7 @@ def audit_bo3_capture(
             "incomplete_window_samples": [dict(row) for row in incomplete_windows],
             "ok": ok,
             "profile": str(job["profile"]),
+            "player_quality_classes": quality_classes,
             "task_counts": task_counts,
             "totals": {key: int(totals[key]) for key in totals.keys()},
         }

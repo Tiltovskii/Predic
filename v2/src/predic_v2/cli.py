@@ -11,6 +11,7 @@ from .bo3_capture import (
     bo3_capture_index,
     capture_bo3,
     plan_bo3_capture,
+    reprocess_bo3_player_snapshots,
 )
 from .db import connect, initialize
 from .hltv_capture import (
@@ -299,6 +300,15 @@ def _parser() -> argparse.ArgumentParser:
     audit_bo3_parser.add_argument("--stream", required=True)
     audit_bo3_parser.add_argument("--max-samples", type=int, default=20)
 
+    reprocess_bo3_parser = subparsers.add_parser(
+        "reprocess-bo3-player-snapshots",
+        help="Offline rebuild of BO3 player indexes from durable raw JSON",
+    )
+    reprocess_bo3_parser.add_argument("--state-db", required=True)
+    reprocess_bo3_parser.add_argument("--stream", required=True)
+    reprocess_bo3_parser.add_argument("--after-game-id", type=int)
+    reprocess_bo3_parser.add_argument("--max-games", type=int)
+
     export_bo3_parser = subparsers.add_parser(
         "export-bo3-capture-index",
         help="Export the BO3 raw snapshot index as deterministic JSONL",
@@ -511,6 +521,15 @@ def main() -> None:
     if args.command == "audit-bo3-capture":
         result = audit_bo3_capture(
             args.state_db, stream=args.stream, max_samples=args.max_samples
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    if args.command == "reprocess-bo3-player-snapshots":
+        result = reprocess_bo3_player_snapshots(
+            args.state_db,
+            stream=args.stream,
+            after_game_id=args.after_game_id,
+            max_games=args.max_games,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return

@@ -175,10 +175,11 @@ the audit gap and does not override host circuits, `429`, or network stops.
 through the one persisted host rate limiter. SQLite state transitions and raw
 snapshot commits remain serialized in the main thread.
 For a closed historical first pass, `--quarantine-incomplete-player-stats`
-stores an empty/partial player payload and its exact quality error once instead
-of repeatedly fetching deterministic source gaps. Existing HTTP-200 quality
-retries are migrated to quarantine without another request. A later repair pass
-can explicitly revisit those tasks. `--continue-on-network-error` keeps other
+stores an empty or structurally invalid player payload and its exact quality
+error once instead of repeatedly fetching deterministic source gaps. Useful
+partial rosters are retained and accepted by the transport while remaining
+visible as dataset gaps. Existing HTTP-200 quality retries are migrated to
+quarantine without another request. `--continue-on-network-error` keeps other
 tasks moving after transient connection failures; host circuits and `429`
 remain hard stops.
 
@@ -201,16 +202,36 @@ checkpoints adopt this player-first scheduling on resume, so the catalog is not
 downloaded again and the full detail queue remains available for a later pass.
 
 A finished map is not complete merely because its HTTP requests returned 200.
-The quality gate requires ten distinct Steam profiles, two teams of five, and
-non-null kills, deaths, assists, damage, ADR, and KAST. Partial responses remain
-visible as retry/quarantine gaps and are never silently accepted. Inspect them
-with:
+Player payloads are classified as `complete_5v5`, `substitution`,
+`partial_roster`, `anomalous`, or `empty`. Eleven or more participants across
+two teams with at least five each are retained as real mid-map substitutions;
+their exact round participation is indexed for later weighting. Eight/nine-row
+payloads are also retained for player timelines but remain explicit lineup
+gaps. Missing KAST is stored as a mask and does not reject otherwise usable
+kills/deaths/assists/damage/ADR. No missing metric is filled with zero or a
+mean. Negative or malformed metrics remain raw and receive anomaly flags. A
+profile's current `is_coach` value is retained only as context: it is not a
+historical match role and never removes an observed participant.
+Inspect the resulting quality classes and gaps with:
 
 ```bash
 predic-data audit-bo3-capture \
   --state-db data/bo3-history-v2-state.sqlite3 \
   --stream bo3-history-2020-2026-v2
 ```
+
+After upgrading an existing checkpoint, rebuild only the derived player index
+from its content-addressed raw objects (no network and no raw mutation):
+
+```bash
+predic-data reprocess-bo3-player-snapshots \
+  --state-db data/bo3-history-v2-state.sqlite3 \
+  --stream bo3-history-2020-2026-v2
+```
+
+The command takes the same exclusive lock as live capture, verifies every raw
+object hash, and is idempotent. `--after-game-id` and `--max-games` provide
+bounded batches when needed.
 
 `rich` additionally schedules kill/flash matrices plus grenade, hit-group, and
 weapon endpoints. `exhaustive` also schedules player stats for every round and

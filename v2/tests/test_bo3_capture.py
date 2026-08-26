@@ -15,6 +15,7 @@ from predic_v2.bo3_capture import (
     bo3_capture_index,
     capture_bo3,
     plan_bo3_capture,
+    reprocess_bo3_player_snapshots,
 )
 
 
@@ -130,6 +131,10 @@ def _players(count: int = 10) -> list[dict[str, object]]:
                 "steam_profile": {
                     "nickname": f"p{index}",
                     "steam_id_64": str(76561198000000000 + index),
+                    "game_round_steam_profiles": [
+                        {"steam_profile_id": 1000 + index, "round_number": 1},
+                        {"steam_profile_id": 1000 + index, "round_number": 2},
+                    ],
                 },
                 "team_clan": {"team_id": team_id},
                 "kills": 10 + index,
@@ -301,7 +306,7 @@ class Bo3CaptureTest(unittest.TestCase):
             self.assertEqual(0, result["totals"]["player_maps"])
             self.assertNotIn("game:pending", result["task_counts"])
 
-    def test_incomplete_player_map_is_retried_and_visible_as_gap(self) -> None:
+    def test_partial_roster_is_retained_once_and_visible_as_gap(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             clock = _Clock()
@@ -312,16 +317,20 @@ class Bo3CaptureTest(unittest.TestCase):
                 ]
             )
 
-            result = self._capture(root, opener, clock)
+            result = self._capture(root, opener, clock, max_requests=2)
 
             self.assertFalse(result["ok"])
-            self.assertEqual("quality_retry", result["stopped_reason"])
+            self.assertIsNone(result["stopped_reason"])
             self.assertEqual(1, result["gaps"]["finished_game_player_gap_count"])
             self.assertEqual(9, result["totals"]["player_maps"])
-            self.assertIn("game_players:retry", result["task_counts"])
+            self.assertIn("game_players:complete", result["task_counts"])
             self.assertIn(
-                "expected 10 player rows",
+                "incomplete lineup",
                 result["incomplete_game_samples"][0]["player_quality_error"],
+            )
+            self.assertEqual(
+                "partial_roster",
+                result["incomplete_game_samples"][0]["player_quality_class"],
             )
 
     def test_bulk_mode_keeps_incomplete_player_map_visible_without_stopping(self) -> None:
@@ -343,7 +352,7 @@ class Bo3CaptureTest(unittest.TestCase):
 
             self.assertIsNone(result["stopped_reason"])
             self.assertFalse(result["ok"])
-            self.assertIn("game_players:retry", result["task_counts"])
+            self.assertIn("game_players:complete", result["task_counts"])
             self.assertEqual(1, result["gaps"]["finished_game_player_gap_count"])
 
     def test_historical_bulk_mode_quarantines_incomplete_payload_once(self) -> None:
@@ -355,7 +364,7 @@ class Bo3CaptureTest(unittest.TestCase):
                 _Opener(
                     [
                         lambda url: _Response(url, _catalog()),
-                        lambda url: _Response(url, _players(9)),
+                        lambda url: _Response(url, []),
                     ]
                 ),
                 clock,
@@ -377,6 +386,112 @@ class Bo3CaptureTest(unittest.TestCase):
                 quarantine_incomplete=True,
             )
             self.assertEqual(0, replay["requests_this_run"])
+
+    def test_kast_missing_is_masked_without_rejecting_complete_lineup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            players = _players()
+            players[0]["kast"] = None
+            result = self._capture(
+                root,
+                _Opener(
+                    [
+                        lambda url: _Response(url, _catalog()),
+                        lambda url: _Response(url, players),
+                    ]
+                ),
+                clock,
+                max_requests=2,
+                profile="training",
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(0, result["gaps"]["finished_game_player_gap_count"])
+            connection = sqlite3.connect(root / "state.sqlite3")
+            connection.row_factory = sqlite3.Row
+            try:
+                game = connection.execute(
+                    "SELECT * FROM bo3_game_index WHERE game_id = 101"
+                ).fetchone()
+                player = connection.execute(
+                    """
+                    SELECT * FROM bo3_player_map_index
+                    WHERE game_id = 101 AND steam_profile_id = 1000
+                    """
+                ).fetchone()
+                self.assertEqual("complete_5v5", game["player_quality_class"])
+                self.assertEqual(1, game["kast_missing_rows"])
+                self.assertEqual(1, game["players_complete"])
+                self.assertEqual(0, player["metrics_complete"])
+                self.assertEqual(1, player["training_metrics_complete"])
+                self.assertEqual('["kast"]', player["missing_metrics_json"])
+            finally:
+                connection.close()
+
+    def test_substitutions_keep_all_participants_and_round_weights(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            players = _players(12)
+            players[0]["steam_profile"]["player"] = {"is_coach": True}
+            for player in players[-2:]:
+                player["steam_profile"]["game_round_steam_profiles"] = [
+                    {
+                        "steam_profile_id": player["steam_profile_id"],
+                        "round_number": 2,
+                    }
+                ]
+            result = self._capture(
+                root,
+                _Opener(
+                    [
+                        lambda url: _Response(url, _catalog()),
+                        lambda url: _Response(url, players),
+                    ]
+                ),
+                clock,
+                max_requests=2,
+                profile="training",
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(12, result["totals"]["player_maps"])
+            self.assertEqual(0, result["gaps"]["finished_game_player_gap_count"])
+            connection = sqlite3.connect(root / "state.sqlite3")
+            connection.row_factory = sqlite3.Row
+            try:
+                game = connection.execute(
+                    "SELECT * FROM bo3_game_index WHERE game_id = 101"
+                ).fetchone()
+                substitute = connection.execute(
+                    """
+                    SELECT * FROM bo3_player_map_index
+                    WHERE game_id = 101 AND steam_profile_id = 1011
+                    """
+                ).fetchone()
+                current_coach = connection.execute(
+                    """
+                    SELECT current_is_coach FROM bo3_player_map_index
+                    WHERE game_id = 101 AND steam_profile_id = 1000
+                    """
+                ).fetchone()
+                self.assertEqual("substitution", game["player_quality_class"])
+                self.assertEqual(1, game["lineup_complete"])
+                self.assertEqual(1, current_coach["current_is_coach"])
+                self.assertEqual(1, substitute["rounds_participated"])
+                self.assertEqual(2, substitute["first_round"])
+                self.assertEqual(0.5, substitute["participation_fraction"])
+            finally:
+                connection.close()
+
+            replay = reprocess_bo3_player_snapshots(
+                root / "state.sqlite3", stream="history"
+            )
+            self.assertEqual(1, replay["processed"])
+            self.assertEqual(1, replay["accepted"])
+            self.assertEqual({"substitution": 1}, replay["quality_classes"])
+            self.assertEqual(0, replay["raw_objects_modified"])
 
     def test_unattended_mode_leaves_network_failure_for_later(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
