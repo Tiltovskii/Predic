@@ -143,9 +143,9 @@ The end date is exclusive. A live bounded run is:
 
 ```bash
 predic-data capture-bo3-json \
-  --state-db data/bo3-history-state.sqlite3 \
-  --output-dir data/bo3-raw \
-  --stream bo3-history-2020-2026-v1 \
+  --state-db data/bo3-history-v2-state.sqlite3 \
+  --output-dir data/bo3-history-raw \
+  --stream bo3-history-2020-2026-v2 \
   --policy data/bo3_capture_policy.local.json \
   --start-date 2020-06-15 \
   --end-date 2026-08-27 \
