@@ -39,6 +39,83 @@ pre-match lineups or rankings. Its source snapshot has
 Because the file has no stable match identifier, every legacy map is stored in
 its own low-confidence series instead of guessing BO3/BO5 group boundaries.
 
+## Downloaded TedTay CS:GO research bootstrap
+
+`import-tedtay-dataset` imports the two **already downloaded** raw files from
+[`tedtay/CS-GO-Pro-Matches-Comprehensive-Dataset`](https://github.com/tedtay/CS-GO-Pro-Matches-Comprehensive-Dataset):
+`historic_games_list.csv` and `game_data_rh.csv`.
+
+```bash
+predic-data import-tedtay-dataset \
+  --db data/predic.sqlite3 \
+  --historic-games-list /path/to/historic_games_list.csv \
+  --game-data-rh /path/to/game_data_rh.csv \
+  --from-date 2018-01-01 \
+  --batch-size 500
+```
+
+This adapter never executes the upstream scraper and makes no network request.
+At audited upstream commit
+`ce8a5f242a768c5698f8068828eeedc4fc134db1`, the repository declares an
+[MIT license](https://github.com/tedtay/CS-GO-Pro-Matches-Comprehensive-Dataset/blob/main/LICENSE.txt)
+whose `LICENSE.txt` SHA-256 is
+`85ce7eda4c1d04cba58e5d9852703b1d978b31c196334bd5fa4dbf146136f285`.
+That is a repository-declared license only: it does **not** establish that the
+CSV data themselves are MIT-licensed or that their rights are verified. Its
+README says the upstream data were scraped from HLTV using Selenium and
+BeautifulSoup. The source is therefore recorded as a **research-bootstrap-only**
+source, not as a replacement for a provider-specific authorization or license.
+The bronze `source_snapshot` stores the exact repository URL, upstream commit,
+license facts, explicit `dataset_rights_verified = false`, and SHA-256 values
+of both downloaded CSV files; it always has `point_in_time_eligible = 0`, and
+every imported `known_at` stays `NULL`.
+
+The importer validates the exact raw header schemas, takes only the first row
+for each exact `game_link` in each file, and parses `mapstatsid` from the link
+as the durable source map ID. Every eligible historic row becomes one
+low-confidence map/series plus two `series_participant` rows. A missing first
+`game_data_rh.csv` row does not make the historic result disappear: it produces
+zero lineup/stat rows and one immutable `tedtay_missing_game_data_rh` raw
+record containing the exact historic CSV row. A map becomes one
+low-confidence series; no BO3/BO5 grouping is inferred from team names and
+dates. Teams are low-confidence name identities. Players are deliberately
+low-confidence identities scoped to `(team, nickname)`, so two opponents with
+the same nickname cannot silently merge.
+
+The player-stat table order is reconciled to the historical map teams only
+when its four captured half-score cells prove one final-score orientation.
+Those fields do not encode overtime totals, and a tied final has no score-based
+orientation. Such maps are still imported with their exact score (a draw has
+`winner_team_id = NULL`) and both `series_participant` rows, but deliberately
+get **zero** team-bound lineup/stat rows. Instead the full exact joined CSV
+payload is written once to `raw_ingest_record` as
+`tedtay_ambiguous_team_binding`, with a snapshot-scoped stream, `known_at =
+NULL`, deterministic content hash, `mapstatsid`, and a reason. The JSON report
+returns counts by kind/reason and at most 20 explicit samples, never an
+unbounded map-ID list. This is intentionally not a source-order or
+roster-history guess; a later evidence-backed resolver can consume those raw
+records.
+
+Malformed dates, links, score cells, and orientable lineups still fail closed.
+The `--from-date` filter is applied to staged historic dates before full
+score/lineup parsing, so known unfinished pre-2018 historical rows do not
+prevent the intended 2018+ import. A source `date_unix_iso` is only an
+un-zoned display timestamp; the importer uses its millisecond `date_unix` as
+the normalized UTC event instant and accepts the corpus's observed UTC/UTC+1
+display form. Each committed batch is one transaction. The importer hashes both
+files before staging and again after staging, aborting if either source changed
+in place. Re-running the same pair safely resumes after an interruption:
+existing map/series/stat rows (including `observed_at` and every inserted
+scalar), lineup rows, and quarantine records must be exactly identical or the
+importer stops instead of overwriting data.
+
+For each score-orientable map, it inserts exactly five starter
+`lineup_member` rows per team and map-level player stats: kills/headshots,
+assists/flash assists, deaths, KAST percentage, ADR, and rating. A legacy
+plain-integer assists cell means `flash_assists = NULL`; `-` in KAST, ADR, or
+rating remains `NULL`, with the original cells retained. The original K/D diff,
+FK diff, and per-player raw cells remain in `metrics_json`.
+
 ## Layers
 
 1. `source_snapshot` is the bronze manifest for immutable files/API payloads.

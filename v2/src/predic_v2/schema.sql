@@ -199,6 +199,7 @@ CREATE TABLE IF NOT EXISTS raw_ingest_record (
 );
 
 CREATE INDEX IF NOT EXISTS idx_map_game_started_at ON map_game(started_at);
+CREATE INDEX IF NOT EXISTS idx_map_game_source_map_id ON map_game(source_map_id);
 CREATE INDEX IF NOT EXISTS idx_series_participant_team ON series_participant(team_id);
 CREATE INDEX IF NOT EXISTS idx_lineup_player ON lineup_member(player_id, actual_at);
 CREATE INDEX IF NOT EXISTS idx_ranking_team_known ON ranking_snapshot(team_id, known_at);

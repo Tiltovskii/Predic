@@ -51,12 +51,30 @@ def audit(connection: sqlite3.Connection) -> dict[str, object]:
         )
         """
     ).fetchone()[0]
-    invalid_scores = connection.execute(
+    negative_scores = connection.execute(
         """
         SELECT COUNT(*)
         FROM map_game
         WHERE score_a IS NOT NULL AND score_b IS NOT NULL
-          AND (score_a < 0 OR score_b < 0 OR score_a = score_b)
+          AND (score_a < 0 OR score_b < 0)
+        """
+    ).fetchone()[0]
+    winner_score_mismatches = connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM map_game
+        WHERE score_a IS NOT NULL AND score_b IS NOT NULL
+          AND (
+              (score_a = score_b AND winner_team_id IS NOT NULL)
+              OR (
+                  score_a > score_b
+                  AND (winner_team_id IS NULL OR winner_team_id <> team_a_id)
+              )
+              OR (
+                  score_b > score_a
+                  AND (winner_team_id IS NULL OR winner_team_id <> team_b_id)
+              )
+          )
         """
     ).fetchone()[0]
     coverage_row = connection.execute(
@@ -106,12 +124,14 @@ def audit(connection: sqlite3.Connection) -> dict[str, object]:
             "map_known_after_start": future_known,
             "lineups_not_exactly_five": incomplete_lineups,
             "duplicate_players_within_lineup": duplicate_players,
-            "invalid_or_tied_finished_scores": invalid_scores,
+            "negative_finished_scores": negative_scores,
+            "winner_score_mismatches": winner_score_mismatches,
         },
         "ok": (
             future_known == 0
             and incomplete_lineups == 0
             and duplicate_players == 0
-            and invalid_scores == 0
+            and negative_scores == 0
+            and winner_score_mismatches == 0
         ),
     }

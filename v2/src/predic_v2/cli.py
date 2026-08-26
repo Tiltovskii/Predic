@@ -25,6 +25,7 @@ from .hltv_discovery import (
 from .legacy import import_legacy_csv
 from .materialize import materialize_raw_stream
 from .raw_jsonl import import_jsonl
+from .tedtay import import_tedtay_dataset
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -40,6 +41,20 @@ def _parser() -> argparse.ArgumentParser:
     legacy_parser.add_argument("--db", required=True)
     legacy_parser.add_argument("--csv", required=True)
     legacy_parser.add_argument("--from-date", type=date.fromisoformat)
+
+    tedtay_parser = subparsers.add_parser(
+        "import-tedtay-dataset",
+        aliases=("import-tedtay-csgo-dataset", "import-tedtay-csgo-pro-matches"),
+        help=(
+            "Import downloaded TedTay historic_games_list.csv + game_data_rh.csv "
+            "as a non-point-in-time research bootstrap"
+        ),
+    )
+    tedtay_parser.add_argument("--db", required=True)
+    tedtay_parser.add_argument("--historic-games-list", required=True)
+    tedtay_parser.add_argument("--game-data-rh", required=True)
+    tedtay_parser.add_argument("--from-date", type=date.fromisoformat)
+    tedtay_parser.add_argument("--batch-size", type=int, default=500)
 
     audit_parser = subparsers.add_parser(
         "audit", help="Run structural and no-future checks"
@@ -380,6 +395,18 @@ def main() -> None:
         result = {"initialized": args.db}
     elif args.command == "import-legacy":
         result = import_legacy_csv(connection, args.csv, args.from_date)
+    elif args.command in {
+        "import-tedtay-dataset",
+        "import-tedtay-csgo-dataset",
+        "import-tedtay-csgo-pro-matches",
+    }:
+        result = import_tedtay_dataset(
+            connection,
+            args.historic_games_list,
+            args.game_data_rh,
+            args.from_date,
+            batch_size=args.batch_size,
+        )
     elif args.command == "audit":
         result = audit(connection)
     elif args.command == "import-jsonl":
