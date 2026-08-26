@@ -116,6 +116,104 @@ plain-integer assists cell means `flash_assists = NULL`; `-` in KAST, ADR, or
 rating remains `NULL`, with the original cells retained. The original K/D diff,
 FK diff, and per-player raw cells remain in `metrics_json`.
 
+## Authorized BO3 raw collection
+
+BO3 is the rich 2020+ source. The collector uses the JSON service at
+`api.bo3.gg`; it does not scrape rendered pages and does not spoof a browser.
+It requires a separately confirmed BO3 permission policy because BO3 currently
+publishes `ai-train=no` in its robots content signal. The committed
+[`bo3_capture_policy.example.json`](examples/bo3_capture_policy.example.json)
+is deliberately disabled. Copy it under ignored `v2/data/`, record the actual
+permission reference/scope/date, keep an identifiable contact in the user
+agent, and only then set `live_enabled` to `true`.
+
+Validate a complete historical plan without making a request:
+
+```bash
+predic-data plan-bo3-capture \
+  --policy data/bo3_capture_policy.local.json \
+  --start-date 2020-06-15 \
+  --end-date 2026-08-27 \
+  --window-days 7 \
+  --page-limit 100 \
+  --profile core
+```
+
+The end date is exclusive. A live bounded run is:
+
+```bash
+predic-data capture-bo3-json \
+  --state-db data/bo3-history-state.sqlite3 \
+  --output-dir data/bo3-raw \
+  --stream bo3-history-2020-2026-v1 \
+  --policy data/bo3_capture_policy.local.json \
+  --start-date 2020-06-15 \
+  --end-date 2026-08-27 \
+  --status finished \
+  --status defwin \
+  --window-days 7 \
+  --page-limit 100 \
+  --profile core \
+  --max-requests 100
+```
+
+Re-run the exact command to continue. One exclusive lock prevents two workers
+from bypassing the shared rate limit. Request time is persisted across restarts;
+`429` respects `Retry-After`, and `401/403/406/418/451` opens a durable host
+circuit instead of trying different headers. Successful JSON is written and
+fsynced under `objects/<sha-prefix>/<sha256>.json` before the corresponding task
+and newly discovered child tasks are committed.
+
+The catalog is split into closed half-open date windows. The first page records
+`total.count`; every expected offset must be captured, and the number of unique
+discovered matches must close exactly. This avoids silently resuming against a
+single moving `2020-now` offset list. Each catalog response discovers match
+details and played game IDs. The `core` profile then captures:
+
+1. match details, including the available veto/pick/ban data;
+2. each played game, including round/team economy data and `demo_url`;
+3. `/games/{id}/players_stats`, including Steam profile/SteamID64, historical
+   team binding, and player-map metrics.
+
+A finished map is not complete merely because its HTTP requests returned 200.
+The quality gate requires ten distinct Steam profiles, two teams of five, and
+non-null kills, deaths, assists, damage, ADR, and KAST. Partial responses remain
+visible as retry/quarantine gaps and are never silently accepted. Inspect them
+with:
+
+```bash
+predic-data audit-bo3-capture \
+  --state-db data/bo3-history-state.sqlite3 \
+  --stream bo3-history-2020-2026-v1
+```
+
+`rich` additionally schedules kill/flash matrices plus grenade, hit-group, and
+weapon endpoints. `exhaustive` also schedules player stats for every round and
+can create several million requests, so it should only be enabled as a later
+targeted enrichment. The first full pass should remain `core`; demo URLs make
+it possible to repair source gaps and derive event-level features later.
+
+Upcoming/current matches belong in separate immutable snapshot streams, for
+example one stream per capture time. Historical re-fetches have `known_at =
+NULL`; a genuinely observed pre-match snapshot may use its capture time as
+`known_at`. Never treat a historical BO3 `updated_at`, current team rank, AI
+prediction, late map disclosure, or bookmaker value as information known before
+the match.
+
+### Swing
+
+FACEIT and HLTV disclose the concept, not their fitted probability model or
+coefficients. Both measure a change in win probability around an action,
+roughly `P(win | state_after) - P(win | state_before)`, but their state,
+credit allocation, and normalization are proprietary and differ. BO3 aggregate
+round JSON is not sufficient to reproduce either metric exactly. A BO3 demo is
+the correct input for a separately versioned `argus_swing_v1`: it exposes the
+ordered kill/damage/flash/bomb state needed to train our own calibrated round
+win-probability model. Do not label that proxy as FACEIT Swing or HLTV Round
+Swing. See the official [FACEIT explanation](https://support.faceit.com/hc/en-us/articles/27123235446428-FACEIT-Season-8-Understanding-Round-Swing),
+[HLTV Rating 3.0 launch](https://www.hltv.org/news/42485/introducing-rating-30),
+and [HLTV's current adjustment](https://www.hltv.org/news/43047/rating-30-adjustments-go-live).
+
 ## Layers
 
 1. `source_snapshot` is the bronze manifest for immutable files/API payloads.

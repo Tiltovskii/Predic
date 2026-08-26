@@ -1,0 +1,36 @@
+{
+  "live_enabled": false,
+  "authorization_ref": "replace-with-written-bo3-permission-reference",
+  "authorization_scope": "api.bo3.gg CS match, map, round, player statistics and demo metadata for private ML research",
+  "authorization_confirmed_at": null,
+  "valid_until": null,
+  "allowed_schemes": [
+    "https"
+  ],
+  "allowed_hosts": [
+    "api.bo3.gg"
+  ],
+  "allowed_path_prefixes": [
+    "/api/v1"
+  ],
+  "allowed_query_keys": [
+    "scope",
+    "page[offset]",
+    "page[limit]",
+    "sort",
+    "filter[matches.status][in]",
+    "filter[matches.start_date][gt]",
+    "filter[matches.start_date][lt]",
+    "filter[matches.discipline_id][eq]",
+    "with"
+  ],
+  "user_agent": "PredicResearch/2.0 (+https://github.com/Tiltovskii/Predic; contact: https://github.com/Tiltovskii)",
+  "contact": "https://github.com/Tiltovskii",
+  "min_interval_seconds": 10,
+  "max_pages_per_run": 500,
+  "max_http_requests_per_run": 500,
+  "max_response_bytes": 20971520,
+  "max_attempts_per_url": 4,
+  "base_backoff_seconds": 60,
+  "robots_txt_mode": "written_permission_override"
+}

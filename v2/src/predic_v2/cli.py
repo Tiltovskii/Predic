@@ -6,6 +6,12 @@ import sys
 from datetime import date
 
 from .audit import audit
+from .bo3_capture import (
+    audit_bo3_capture,
+    bo3_capture_index,
+    capture_bo3,
+    plan_bo3_capture,
+)
 from .db import connect, initialize
 from .hltv_capture import (
     clear_host_circuit,
@@ -220,6 +226,64 @@ def _parser() -> argparse.ArgumentParser:
     review_host_parser.add_argument("--host", required=True)
     review_host_parser.add_argument("--authorization-ref", required=True)
     review_host_parser.add_argument("--reason", required=True)
+
+    plan_bo3_parser = subparsers.add_parser(
+        "plan-bo3-capture",
+        help="Validate an authorized BO3 API crawl plan without network use",
+    )
+    plan_bo3_parser.add_argument("--policy", required=True)
+    plan_bo3_parser.add_argument("--start-date", type=date.fromisoformat, required=True)
+    plan_bo3_parser.add_argument("--end-date", type=date.fromisoformat, required=True)
+    plan_bo3_parser.add_argument(
+        "--status", action="append", default=None,
+        help="repeatable; defaults to finished and defwin",
+    )
+    plan_bo3_parser.add_argument("--window-days", type=int, default=7)
+    plan_bo3_parser.add_argument("--page-limit", type=int, default=100)
+    plan_bo3_parser.add_argument(
+        "--profile", choices=("catalog", "core", "rich", "exhaustive"),
+        default="core",
+    )
+
+    capture_bo3_parser = subparsers.add_parser(
+        "capture-bo3-json",
+        help="Slow, resumable, explicitly authorized BO3 API raw capture",
+    )
+    capture_bo3_parser.add_argument("--state-db", required=True)
+    capture_bo3_parser.add_argument("--output-dir", required=True)
+    capture_bo3_parser.add_argument("--stream", required=True)
+    capture_bo3_parser.add_argument("--policy", required=True)
+    capture_bo3_parser.add_argument("--start-date", type=date.fromisoformat, required=True)
+    capture_bo3_parser.add_argument("--end-date", type=date.fromisoformat, required=True)
+    capture_bo3_parser.add_argument(
+        "--status", action="append", default=None,
+        help="repeatable; defaults to finished and defwin",
+    )
+    capture_bo3_parser.add_argument("--window-days", type=int, default=7)
+    capture_bo3_parser.add_argument("--page-limit", type=int, default=100)
+    capture_bo3_parser.add_argument(
+        "--profile", choices=("catalog", "core", "rich", "exhaustive"),
+        default="core",
+    )
+    capture_bo3_parser.add_argument("--max-requests", type=int)
+    capture_bo3_parser.add_argument(
+        "--timeout-seconds", type=float, default=30.0,
+    )
+
+    audit_bo3_parser = subparsers.add_parser(
+        "audit-bo3-capture",
+        help="Report unfinished catalog windows and player-map gaps",
+    )
+    audit_bo3_parser.add_argument("--state-db", required=True)
+    audit_bo3_parser.add_argument("--stream", required=True)
+    audit_bo3_parser.add_argument("--max-samples", type=int, default=20)
+
+    export_bo3_parser = subparsers.add_parser(
+        "export-bo3-capture-index",
+        help="Export the BO3 raw snapshot index as deterministic JSONL",
+    )
+    export_bo3_parser.add_argument("--state-db", required=True)
+    export_bo3_parser.add_argument("--stream", required=True)
     return parser
 
 
@@ -387,6 +451,54 @@ def main() -> None:
             reason=args.reason,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    if args.command == "plan-bo3-capture":
+        result = plan_bo3_capture(
+            args.policy,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            statuses=args.status or ("finished", "defwin"),
+            window_days=args.window_days,
+            page_limit=args.page_limit,
+            profile=args.profile,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    if args.command == "capture-bo3-json":
+        result = capture_bo3(
+            args.state_db,
+            args.output_dir,
+            stream=args.stream,
+            policy_path=args.policy,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            statuses=args.status or ("finished", "defwin"),
+            window_days=args.window_days,
+            page_limit=args.page_limit,
+            profile=args.profile,
+            max_requests=args.max_requests,
+            timeout_seconds=args.timeout_seconds,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        if result["stopped_reason"]:
+            raise SystemExit(2)
+        return
+    if args.command == "audit-bo3-capture":
+        result = audit_bo3_capture(
+            args.state_db, stream=args.stream, max_samples=args.max_samples
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    if args.command == "export-bo3-capture-index":
+        for record in bo3_capture_index(args.state_db, stream=args.stream):
+            print(
+                json.dumps(
+                    record,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
         return
 
     connection = connect(args.db)
