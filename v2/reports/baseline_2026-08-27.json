@@ -1,0 +1,54 @@
+{
+  "data": {
+    "matches": 76983,
+    "source_range": ["2020-06-15", "2026-08-26"],
+    "valve_ranking_rows": 28198,
+    "valve_ranking_range": ["2022-12-21", "2026-08-03"],
+    "valve_ranking_snapshots": {
+      "global": 45,
+      "regional": 67
+    }
+  },
+  "split": {
+    "train": 51157,
+    "validation": 15142,
+    "test": 10684,
+    "train_before": "2025-01-01",
+    "test_from": "2026-01-01"
+  },
+  "winner_test": {
+    "accuracy": 0.6523773867,
+    "roc_auc": 0.7061806981,
+    "logloss": 0.6229421769,
+    "brier": 0.2167581197,
+    "ece_10bin": 0.0243287126
+  },
+  "winner_tier_s_a_test": {
+    "rows": 787,
+    "accuracy": 0.6607369759,
+    "roc_auc": 0.7031524326,
+    "logloss": 0.6285187073
+  },
+  "confidence_at_least_0_65": {
+    "all_tiers_rows": 4084,
+    "all_tiers_accuracy": 0.7673849167,
+    "tier_s_a_rows": 334,
+    "tier_s_a_accuracy": 0.7395209581
+  },
+  "bo3_exact_score_test": {
+    "rows": 7369,
+    "accuracy": 0.4383227032,
+    "logloss": 1.2513350606,
+    "implied_winner_accuracy": 0.6691545664,
+    "implied_winner_roc_auc": 0.7266993883,
+    "implied_winner_logloss": 0.6049306036
+  },
+  "baselines": {
+    "constant_0_5_logloss": 0.6931471806,
+    "dynamic_elo_accuracy": 0.6284163235,
+    "dynamic_elo_roc_auc": 0.6760175798,
+    "dynamic_elo_logloss": 0.6394569719,
+    "bo3_majority_exact_accuracy": 0.3455014249,
+    "bo3_train_prior_logloss": 1.3585657720
+  }
+}

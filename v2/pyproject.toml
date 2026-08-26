@@ -9,6 +9,12 @@ description = "Point-in-time CS/CS2 data ingestion and backtesting dataset"
 requires-python = ">=3.11"
 dependencies = []
 
+[project.optional-dependencies]
+baseline = [
+  "catboost>=1.2,<2",
+  "pandas>=2.2,<4",
+]
+
 [project.scripts]
 predic-data = "predic_v2.cli:main"
 

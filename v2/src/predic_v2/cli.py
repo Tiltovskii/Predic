@@ -6,6 +6,11 @@ import sys
 from datetime import date
 
 from .audit import audit
+from .baseline import (
+    build_point_in_time_features,
+    extract_bo3_match_table,
+    train_catboost_baseline,
+)
 from .bo3_capture import (
     audit_bo3_capture,
     bo3_capture_index,
@@ -16,13 +21,12 @@ from .bo3_capture import (
 )
 from .db import connect, initialize
 from .hltv_capture import (
-    clear_host_circuit,
     capture_index,
     capture_manifest,
+    clear_host_circuit,
     parsed_capture_records,
     plan_capture,
 )
-from .hltv_offline import parse_file, records_to_jsonl
 from .hltv_discovery import (
     aggregate_match_manifest,
     derive_results_pagination_manifest,
@@ -30,10 +34,12 @@ from .hltv_discovery import (
     extract_match_manifest,
     generate_results_manifest,
 )
+from .hltv_offline import parse_file, records_to_jsonl
 from .legacy import import_legacy_csv
 from .materialize import materialize_raw_stream
 from .raw_jsonl import import_jsonl
 from .tedtay import import_tedtay_dataset
+from .valve_rankings import collect_valve_rankings
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -133,8 +139,12 @@ def _parser() -> argparse.ArgumentParser:
         "generate-hltv-results-manifest",
         help="Generate bounded, date-windowed HLTV results listing URLs without network access",
     )
-    results_manifest_parser.add_argument("--start-date", type=date.fromisoformat, required=True)
-    results_manifest_parser.add_argument("--end-date", type=date.fromisoformat, required=True)
+    results_manifest_parser.add_argument(
+        "--start-date", type=date.fromisoformat, required=True
+    )
+    results_manifest_parser.add_argument(
+        "--end-date", type=date.fromisoformat, required=True
+    )
     results_manifest_parser.add_argument("--window-days", type=int, default=7)
     results_manifest_parser.add_argument(
         "--url-template",
@@ -181,8 +191,12 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         help="repeat for every root and already captured pagination-child stream",
     )
-    aggregate_match_parser.add_argument("--start-date", type=date.fromisoformat, required=True)
-    aggregate_match_parser.add_argument("--end-date", type=date.fromisoformat, required=True)
+    aggregate_match_parser.add_argument(
+        "--start-date", type=date.fromisoformat, required=True
+    )
+    aggregate_match_parser.add_argument(
+        "--end-date", type=date.fromisoformat, required=True
+    )
     aggregate_match_parser.add_argument("--allow-partial", action="store_true")
     aggregate_match_parser.add_argument(
         "--allow-incomplete",
@@ -237,13 +251,16 @@ def _parser() -> argparse.ArgumentParser:
     plan_bo3_parser.add_argument("--start-date", type=date.fromisoformat, required=True)
     plan_bo3_parser.add_argument("--end-date", type=date.fromisoformat, required=True)
     plan_bo3_parser.add_argument(
-        "--status", action="append", default=None,
+        "--status",
+        action="append",
+        default=None,
         help="repeatable; defaults to finished and defwin",
     )
     plan_bo3_parser.add_argument("--window-days", type=int, default=7)
     plan_bo3_parser.add_argument("--page-limit", type=int, default=100)
     plan_bo3_parser.add_argument(
-        "--profile", choices=("catalog", "training", "core", "rich", "exhaustive"),
+        "--profile",
+        choices=("catalog", "training", "core", "rich", "exhaustive"),
         default="core",
     )
 
@@ -255,21 +272,30 @@ def _parser() -> argparse.ArgumentParser:
     capture_bo3_parser.add_argument("--output-dir", required=True)
     capture_bo3_parser.add_argument("--stream", required=True)
     capture_bo3_parser.add_argument("--policy", required=True)
-    capture_bo3_parser.add_argument("--start-date", type=date.fromisoformat, required=True)
-    capture_bo3_parser.add_argument("--end-date", type=date.fromisoformat, required=True)
     capture_bo3_parser.add_argument(
-        "--status", action="append", default=None,
+        "--start-date", type=date.fromisoformat, required=True
+    )
+    capture_bo3_parser.add_argument(
+        "--end-date", type=date.fromisoformat, required=True
+    )
+    capture_bo3_parser.add_argument(
+        "--status",
+        action="append",
+        default=None,
         help="repeatable; defaults to finished and defwin",
     )
     capture_bo3_parser.add_argument("--window-days", type=int, default=7)
     capture_bo3_parser.add_argument("--page-limit", type=int, default=100)
     capture_bo3_parser.add_argument(
-        "--profile", choices=("catalog", "training", "core", "rich", "exhaustive"),
+        "--profile",
+        choices=("catalog", "training", "core", "rich", "exhaustive"),
         default="core",
     )
     capture_bo3_parser.add_argument("--max-requests", type=int)
     capture_bo3_parser.add_argument(
-        "--timeout-seconds", type=float, default=30.0,
+        "--timeout-seconds",
+        type=float,
+        default=30.0,
     )
     capture_bo3_parser.add_argument(
         "--continue-on-quality-error",
@@ -325,6 +351,39 @@ def _parser() -> argparse.ArgumentParser:
     )
     export_bo3_parser.add_argument("--state-db", required=True)
     export_bo3_parser.add_argument("--stream", required=True)
+
+    valve_rankings_parser = subparsers.add_parser(
+        "collect-valve-rankings",
+        help="Export official historical Valve standings from Valve's git repository",
+    )
+    valve_rankings_parser.add_argument("--repo", required=True)
+    valve_rankings_parser.add_argument("--output-csv", required=True)
+
+    baseline_extract_parser = subparsers.add_parser(
+        "extract-bo3-baseline-matches",
+        help="Extract compact BO3 series outcomes without round/player metrics",
+    )
+    baseline_extract_parser.add_argument("--state-db", required=True)
+    baseline_extract_parser.add_argument("--output-csv", required=True)
+    baseline_extract_parser.add_argument("--stream", default="bo3-history-2020-2026-v2")
+
+    baseline_features_parser = subparsers.add_parser(
+        "build-baseline-features",
+        help="Build chronological no-future team/player counter features",
+    )
+    baseline_features_parser.add_argument("--matches-csv", required=True)
+    baseline_features_parser.add_argument("--output-csv", required=True)
+    baseline_features_parser.add_argument("--rankings-csv")
+
+    baseline_train_parser = subparsers.add_parser(
+        "train-catboost-baseline",
+        help="Train winner and BO3 exact-score CatBoost temporal baselines",
+    )
+    baseline_train_parser.add_argument("--features-csv", required=True)
+    baseline_train_parser.add_argument("--output-dir", required=True)
+    baseline_train_parser.add_argument("--train-before", default="2025-01-01")
+    baseline_train_parser.add_argument("--test-from", default="2026-01-01")
+    baseline_train_parser.add_argument("--iterations", type=int, default=900)
     return parser
 
 
@@ -562,6 +621,34 @@ def main() -> None:
                     sort_keys=True,
                 )
             )
+        return
+    if args.command == "collect-valve-rankings":
+        result = collect_valve_rankings(args.repo, args.output_csv)
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    if args.command == "extract-bo3-baseline-matches":
+        result = extract_bo3_match_table(
+            args.state_db, args.output_csv, stream=args.stream
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    if args.command == "build-baseline-features":
+        result = build_point_in_time_features(
+            args.matches_csv,
+            args.output_csv,
+            rankings_csv=args.rankings_csv,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    if args.command == "train-catboost-baseline":
+        result = train_catboost_baseline(
+            args.features_csv,
+            args.output_dir,
+            train_before=args.train_before,
+            test_from=args.test_from,
+            iterations=args.iterations,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return
 
     connection = connect(args.db)

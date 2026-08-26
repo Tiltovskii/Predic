@@ -1,5 +1,8 @@
 # Predic v2 data layer
 
+The first causal CatBoost winner/exact-score baseline, its temporal split,
+metrics, and reproduction commands are documented in [BASELINE.md](BASELINE.md).
+
 This directory contains the point-in-time data foundation for a CS/CS2 match
 prediction project. Network capture is disabled by default. The HLTV collector
 may be enabled only for routes and uses covered by explicit written permission;
