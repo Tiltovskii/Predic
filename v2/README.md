@@ -233,6 +233,20 @@ The command takes the same exclusive lock as live capture, verifies every raw
 object hash, and is idempotent. `--after-game-id` and `--max-games` provide
 bounded batches when needed.
 
+Game-detail responses use the same bronze/silver split. A declared round count
+that differs from the returned unique round records is retained with
+`rounds_coverage`, exact missing/unexpected-round masks, and a quality class;
+it is not refetched or silently treated as exact. Contiguous observations above
+a stale declared count remain usable. Duplicate round numbers stay in strict
+quarantine. Rebuild these derived fields offline after upgrading an existing
+checkpoint:
+
+```bash
+predic-data reprocess-bo3-game-snapshots \
+  --state-db data/bo3-history-v2-state.sqlite3 \
+  --stream bo3-history-2020-2026-v2
+```
+
 `rich` additionally schedules kill/flash matrices plus grenade, hit-group, and
 weapon endpoints. `exhaustive` also schedules player stats for every round and
 can create several million requests, so it should only be enabled as a later

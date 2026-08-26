@@ -32,6 +32,7 @@ from .hltv_capture import (
 
 CAPTURE_VERSION = "bo3-api-capture-v1"
 PLAYER_NORMALIZER_VERSION = "bo3-player-normalizer-v2"
+GAME_NORMALIZER_VERSION = "bo3-game-normalizer-v2"
 API_ROOT = "https://api.bo3.gg/api/v1"
 DEFAULT_TIMEOUT_SECONDS = 30.0
 PROFILE_LEVEL = {
@@ -226,6 +227,16 @@ CREATE TABLE IF NOT EXISTS bo3_game_index (
     rounds_count INTEGER,
     stats_expected INTEGER NOT NULL DEFAULT 0,
     game_detail_complete INTEGER NOT NULL DEFAULT 0,
+    game_quality_class TEXT,
+    game_quality_error TEXT,
+    rounds_returned INTEGER,
+    game_payload_rounds_count INTEGER,
+    rounds_observed_max INTEGER,
+    rounds_complete INTEGER NOT NULL DEFAULT 0,
+    rounds_coverage REAL,
+    missing_rounds_json TEXT NOT NULL DEFAULT '[]',
+    unexpected_rounds_json TEXT NOT NULL DEFAULT '[]',
+    demo_url TEXT,
     player_rows INTEGER,
     distinct_players INTEGER,
     distinct_teams INTEGER,
@@ -333,6 +344,16 @@ def _connect_state(path: Path) -> sqlite3.Connection:
             """
         )
     game_migrations = {
+        "game_quality_class": "TEXT",
+        "game_quality_error": "TEXT",
+        "rounds_returned": "INTEGER",
+        "game_payload_rounds_count": "INTEGER",
+        "rounds_observed_max": "INTEGER",
+        "rounds_complete": "INTEGER NOT NULL DEFAULT 0",
+        "rounds_coverage": "REAL",
+        "missing_rounds_json": "TEXT NOT NULL DEFAULT '[]'",
+        "unexpected_rounds_json": "TEXT NOT NULL DEFAULT '[]'",
+        "demo_url": "TEXT",
         "lineup_complete": "INTEGER NOT NULL DEFAULT 0",
         "player_quality_class": "TEXT",
         "missing_metric_rows": "INTEGER NOT NULL DEFAULT 0",
@@ -366,7 +387,7 @@ def _connect_state(path: Path) -> sqlite3.Connection:
             )
     connection.execute(
         """
-        INSERT INTO bo3_state_meta (key, value) VALUES ('schema_version', '2')
+        INSERT INTO bo3_state_meta (key, value) VALUES ('schema_version', '3')
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
         """
     )
@@ -1380,31 +1401,122 @@ def _process_game(
         if not isinstance(item, dict):
             raise Bo3QualityError("game_rounds entries must be objects")
         round_numbers.append(_integer(item.get("round_number"), "round.round_number"))
-    if len(set(round_numbers)) != len(round_numbers):
-        raise Bo3QualityError("game has duplicate round numbers")
-    declared_rounds = _optional_integer(payload.get("rounds_count"), "game.rounds_count")
-    if declared_rounds is not None and rounds and declared_rounds != len(rounds):
-        raise Bo3QualityError(
-            f"game {game_id} declares {declared_rounds} rounds but contains {len(rounds)}"
+    payload_rounds_count = _optional_integer(
+        payload.get("rounds_count"), "game.rounds_count"
+    )
+    if payload_rounds_count is not None and payload_rounds_count < 0:
+        raise Bo3QualityError("game.rounds_count must be non-negative")
+    existing_game = connection.execute(
+        "SELECT rounds_count FROM bo3_game_index WHERE stream = ? AND game_id = ?",
+        (task.stream, game_id),
+    ).fetchone()
+    indexed_rounds_count = (
+        int(existing_game[0])
+        if existing_game is not None and existing_game[0] is not None
+        else None
+    )
+    unique_rounds = set(round_numbers)
+    duplicate_rounds = sorted(
+        number for number, count in Counter(round_numbers).items() if count > 1
+    )
+    observed_max = max(unique_rounds, default=None)
+    effective_rounds = max(
+        indexed_rounds_count or 0,
+        payload_rounds_count or 0,
+        observed_max or 0,
+    )
+    expected_rounds = set(range(1, effective_rounds + 1))
+    missing_rounds = sorted(expected_rounds - unique_rounds)
+    unexpected_rounds = sorted(
+        number
+        for number in unique_rounds
+        if payload_rounds_count is not None and number > payload_rounds_count
+    )
+    contiguous_observation = bool(unique_rounds) and unique_rounds == set(
+        range(1, (observed_max or 0) + 1)
+    )
+    if duplicate_rounds:
+        quality_class = "duplicate_rounds"
+        rounds_complete = False
+    elif not round_numbers:
+        quality_class = "empty_rounds"
+        rounds_complete = False
+    elif (
+        payload_rounds_count is not None
+        and observed_max is not None
+        and observed_max > payload_rounds_count
+        and contiguous_observation
+        and not missing_rounds
+    ):
+        quality_class = "declared_round_count_stale"
+        rounds_complete = True
+    elif not missing_rounds and contiguous_observation:
+        quality_class = "complete_rounds"
+        rounds_complete = True
+    else:
+        quality_class = "partial_rounds"
+        rounds_complete = False
+    warnings: list[str] = []
+    if not round_numbers:
+        warnings.append("no round records returned")
+    if payload_rounds_count is not None and payload_rounds_count != len(rounds):
+        warnings.append(
+            f"game payload declares {payload_rounds_count} rounds "
+            f"but contains {len(rounds)}"
         )
+    if missing_rounds:
+        warnings.append(f"missing {len(missing_rounds)} round records")
+    if unexpected_rounds:
+        warnings.append(
+            f"contains {len(unexpected_rounds)} rounds above declared count"
+        )
+    if duplicate_rounds:
+        warnings.append(f"duplicate round numbers: {duplicate_rounds}")
+    demo_url = payload.get("demo_url")
+    if demo_url is not None and not isinstance(demo_url, str):
+        warnings.append("demo_url is not a string")
+        demo_url = None
+    warning_text = "; ".join(warnings) if warnings else None
     connection.execute(
         """
         UPDATE bo3_game_index
         SET map_name = COALESCE(?, map_name), status = COALESCE(?, status),
             rounds_count = COALESCE(?, rounds_count), stats_expected = 1,
-            game_detail_complete = 1,
+            game_detail_complete = ?, game_quality_class = ?,
+            game_quality_error = ?, rounds_returned = ?,
+            game_payload_rounds_count = ?,
+            rounds_observed_max = ?, rounds_complete = ?, rounds_coverage = ?,
+            missing_rounds_json = ?, unexpected_rounds_json = ?,
+            demo_url = COALESCE(?, demo_url),
             last_snapshot_id = ?
         WHERE stream = ? AND game_id = ?
         """,
         (
             payload.get("map_name"),
             payload.get("status"),
-            declared_rounds if declared_rounds is not None else len(rounds) or None,
+            effective_rounds or None,
+            int(not duplicate_rounds),
+            quality_class,
+            warning_text,
+            len(rounds),
+            payload_rounds_count,
+            observed_max,
+            int(rounds_complete),
+            (
+                len(unique_rounds) / effective_rounds
+                if effective_rounds > 0
+                else 0.0
+            ),
+            json.dumps(missing_rounds, separators=(",", ":")),
+            json.dumps(unexpected_rounds, separators=(",", ":")),
+            demo_url,
             snapshot_id,
             task.stream,
             game_id,
         ),
     )
+    if duplicate_rounds:
+        raise Bo3QualityError("game has duplicate round numbers")
     _insert_task(
         connection,
         stream=task.stream,
@@ -2512,6 +2624,177 @@ def reprocess_bo3_player_snapshots(
         _release_lock(lock)
 
 
+def reprocess_bo3_game_snapshots(
+    state_db: str | Path,
+    *,
+    stream: str,
+    after_game_id: int | None = None,
+    max_games: int | None = None,
+    now_fn: Callable[[], datetime] = _utc_now,
+) -> dict[str, object]:
+    """Rebuild game-detail quality indexes from durable raw JSON snapshots."""
+
+    if after_game_id is not None and after_game_id < 0:
+        raise ValueError("after_game_id must be non-negative")
+    if max_games is not None and max_games < 1:
+        raise ValueError("max_games must be positive")
+    state_path = Path(state_db).resolve()
+    lock = _acquire_lock(state_path)
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = _connect_state(state_path)
+        job = connection.execute(
+            "SELECT output_dir FROM bo3_capture_job WHERE stream = ?", (stream,)
+        ).fetchone()
+        if job is None:
+            raise ValueError(f"unknown BO3 stream: {stream}")
+        output_dir = Path(str(job["output_dir"])).resolve()
+        parameters: list[object] = [stream]
+        after_clause = ""
+        if after_game_id is not None:
+            after_clause = "AND CAST(t.source_id AS INTEGER) > ?"
+            parameters.append(after_game_id)
+        limit_clause = ""
+        if max_games is not None:
+            limit_clause = "LIMIT ?"
+            parameters.append(max_games)
+        rows = connection.execute(
+            f"""
+            SELECT * FROM (
+                SELECT s.snapshot_id, s.content_sha256, s.object_path,
+                       t.stream, t.task_key, t.kind, t.source_id, t.url,
+                       t.attempts, t.metadata_json,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY t.stream, t.task_key
+                           ORDER BY s.observed_at DESC, s.snapshot_id DESC
+                       ) AS recency
+                FROM bo3_task AS t
+                JOIN bo3_snapshot AS s
+                  ON s.stream = t.stream AND s.task_key = t.task_key
+                WHERE t.stream = ? AND t.kind = 'game'
+                  {after_clause}
+            )
+            WHERE recency = 1
+            ORDER BY CAST(source_id AS INTEGER)
+            {limit_clause}
+            """,
+            parameters,
+        ).fetchall()
+        processed = 0
+        accepted = 0
+        quarantined = 0
+        quality_counts: Counter[str] = Counter()
+        last_game_id: int | None = None
+        for row in rows:
+            game_id = int(row["source_id"])
+            object_path = output_dir / str(row["object_path"])
+            if not object_path.is_file():
+                raise Bo3StorageError(
+                    f"missing raw object for game {game_id}: {object_path}"
+                )
+            actual_hash = _sha256_file(object_path)
+            if actual_hash != str(row["content_sha256"]):
+                raise Bo3StorageError(
+                    f"raw object hash mismatch for game {game_id}: "
+                    f"expected {row['content_sha256']}, got {actual_hash}"
+                )
+            try:
+                payload = json.loads(object_path.read_bytes())
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise Bo3StorageError(
+                    f"cannot read raw object for game {game_id}: {error}"
+                ) from error
+            task = _Task(
+                stream=str(row["stream"]),
+                task_key=str(row["task_key"]),
+                kind=str(row["kind"]),
+                source_id=str(row["source_id"]),
+                url=str(row["url"]),
+                attempts=int(row["attempts"]),
+                metadata=json.loads(str(row["metadata_json"])),
+            )
+            quality_error: str | None = None
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                try:
+                    _process_game(
+                        connection,
+                        task,
+                        payload,
+                        str(row["snapshot_id"]),
+                        _iso(now_fn()),
+                    )
+                except Bo3QualityError as error:
+                    quality_error = str(error)
+                new_status = "quarantined" if quality_error else "complete"
+                connection.execute(
+                    """
+                    UPDATE bo3_snapshot
+                    SET quality_status = ?, quality_error = ?
+                    WHERE snapshot_id = ?
+                    """,
+                    (
+                        "incomplete" if quality_error else "complete",
+                        quality_error,
+                        row["snapshot_id"],
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE bo3_task
+                    SET status = ?, next_eligible_at = NULL, last_error = ?,
+                        updated_at = ?
+                    WHERE stream = ? AND task_key = ?
+                    """,
+                    (
+                        new_status,
+                        quality_error,
+                        _iso(now_fn()),
+                        stream,
+                        row["task_key"],
+                    ),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+            game = connection.execute(
+                """
+                SELECT game_quality_class
+                FROM bo3_game_index WHERE stream = ? AND game_id = ?
+                """,
+                (stream, game_id),
+            ).fetchone()
+            quality_counts[str(game[0] if game and game[0] else "unclassified")] += 1
+            processed += 1
+            accepted += int(quality_error is None)
+            quarantined += int(quality_error is not None)
+            last_game_id = game_id
+        with connection:
+            connection.execute(
+                """
+                INSERT INTO bo3_state_meta (key, value)
+                VALUES ('game_normalizer_version', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (GAME_NORMALIZER_VERSION,),
+            )
+        return {
+            "accepted": accepted,
+            "last_game_id": last_game_id,
+            "normalizer_version": GAME_NORMALIZER_VERSION,
+            "processed": processed,
+            "quality_classes": dict(sorted(quality_counts.items())),
+            "quarantined": quarantined,
+            "raw_objects_modified": 0,
+            "stream": stream,
+        }
+    finally:
+        if connection is not None:
+            connection.close()
+        _release_lock(lock)
+
+
 def audit_bo3_capture(
     state_db: str | Path, *, stream: str, max_samples: int = 20
 ) -> dict[str, object]:
@@ -2568,7 +2851,10 @@ def audit_bo3_capture(
         incomplete_games = connection.execute(
             """
             SELECT g.game_id, g.match_id, g.map_name, g.rounds_count,
-                   g.game_detail_complete, g.player_rows, g.distinct_players,
+                   g.game_detail_complete, g.game_quality_class,
+                   g.game_quality_error, g.rounds_returned,
+                   g.rounds_observed_max, g.rounds_complete,
+                   g.rounds_coverage, g.player_rows, g.distinct_players,
                    g.distinct_teams, g.players_complete, g.lineup_complete,
                    g.player_quality_class, g.missing_metric_rows,
                    g.kast_missing_rows, g.anomalous_player_rows,
@@ -2581,12 +2867,13 @@ def audit_bo3_capture(
               AND (
                   g.map_name IS NULL
                   OR (? = 1 AND g.game_detail_complete = 0)
+                  OR (? = 1 AND g.game_detail_complete = 1 AND g.rounds_complete = 0)
                   OR g.players_complete = 0
               )
             ORDER BY m.start_date, g.match_id, g.map_number
             LIMIT ?
             """,
-            (stream, requires_game_detail, max_samples),
+            (stream, requires_game_detail, requires_game_detail, max_samples),
         ).fetchall()
         identity_conflicts = connection.execute(
             """
@@ -2637,6 +2924,19 @@ def audit_bo3_capture(
                 (stream,),
             )
         }
+        game_quality_classes = {
+            str(row["game_quality_class"] or "unclassified"): int(row["count"])
+            for row in connection.execute(
+                """
+                SELECT game_quality_class, COUNT(*) AS count
+                FROM bo3_game_index
+                WHERE stream = ? AND stats_expected = 1
+                GROUP BY game_quality_class
+                ORDER BY game_quality_class
+                """,
+                (stream,),
+            )
+        }
         gaps = {
             "incomplete_window_count": sum(
                 1
@@ -2667,6 +2967,18 @@ def audit_bo3_capture(
                     FROM bo3_game_index
                     WHERE stream = ? AND stats_expected = 1
                       AND ? = 1 AND game_detail_complete = 0
+                    """,
+                    (stream, requires_game_detail),
+                ).fetchone()[0]
+            ),
+            "finished_game_round_gap_count": int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM bo3_game_index
+                    WHERE stream = ? AND stats_expected = 1
+                      AND ? = 1 AND game_detail_complete = 1
+                      AND rounds_complete = 0
                     """,
                     (stream, requires_game_detail),
                 ).fetchone()[0]
@@ -2720,6 +3032,7 @@ def audit_bo3_capture(
             "incomplete_window_samples": [dict(row) for row in incomplete_windows],
             "ok": ok,
             "profile": str(job["profile"]),
+            "game_quality_classes": game_quality_classes,
             "player_quality_classes": quality_classes,
             "task_counts": task_counts,
             "totals": {key: int(totals[key]) for key in totals.keys()},

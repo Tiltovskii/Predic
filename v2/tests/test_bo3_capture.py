@@ -15,6 +15,7 @@ from predic_v2.bo3_capture import (
     bo3_capture_index,
     capture_bo3,
     plan_bo3_capture,
+    reprocess_bo3_game_snapshots,
     reprocess_bo3_player_snapshots,
 )
 
@@ -492,6 +493,155 @@ class Bo3CaptureTest(unittest.TestCase):
             self.assertEqual(1, replay["accepted"])
             self.assertEqual({"substitution": 1}, replay["quality_classes"])
             self.assertEqual(0, replay["raw_objects_modified"])
+
+    def test_partial_game_rounds_are_masked_without_rejecting_detail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            game = _game()
+            game["rounds_count"] = 3
+            game["game_rounds"] = [
+                {"round_number": 1},
+                {"round_number": 3},
+            ]
+            result = self._capture(
+                root,
+                _Opener(
+                    [
+                        lambda url: _Response(url, _catalog()),
+                        lambda url: _Response(url, _players()),
+                        lambda url: _Response(url, _match()),
+                        lambda url: _Response(url, game),
+                    ]
+                ),
+                clock,
+            )
+
+            self.assertIsNone(result["stopped_reason"])
+            self.assertIn("game:complete", result["task_counts"])
+            self.assertEqual(0, result["gaps"]["finished_game_detail_gap_count"])
+            self.assertEqual(1, result["gaps"]["finished_game_round_gap_count"])
+            connection = sqlite3.connect(root / "state.sqlite3")
+            connection.row_factory = sqlite3.Row
+            try:
+                row = connection.execute(
+                    "SELECT * FROM bo3_game_index WHERE game_id = 101"
+                ).fetchone()
+                self.assertEqual("partial_rounds", row["game_quality_class"])
+                self.assertEqual(1, row["game_detail_complete"])
+                self.assertEqual(0, row["rounds_complete"])
+                self.assertAlmostEqual(2 / 3, row["rounds_coverage"])
+                self.assertEqual("[2]", row["missing_rounds_json"])
+            finally:
+                connection.close()
+
+            replay = reprocess_bo3_game_snapshots(
+                root / "state.sqlite3", stream="history"
+            )
+            self.assertEqual(1, replay["processed"])
+            self.assertEqual(1, replay["accepted"])
+            self.assertEqual({"partial_rounds": 1}, replay["quality_classes"])
+
+    def test_contiguous_rounds_above_declared_count_are_stale_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            game = _game()
+            game["game_rounds"].append({"round_number": 3})
+            result = self._capture(
+                root,
+                _Opener(
+                    [
+                        lambda url: _Response(url, _catalog()),
+                        lambda url: _Response(url, _players()),
+                        lambda url: _Response(url, _match()),
+                        lambda url: _Response(url, game),
+                    ]
+                ),
+                clock,
+            )
+
+            self.assertTrue(result["ok"])
+            connection = sqlite3.connect(root / "state.sqlite3")
+            connection.row_factory = sqlite3.Row
+            try:
+                row = connection.execute(
+                    "SELECT * FROM bo3_game_index WHERE game_id = 101"
+                ).fetchone()
+                self.assertEqual(
+                    "declared_round_count_stale", row["game_quality_class"]
+                )
+                self.assertEqual(1, row["rounds_complete"])
+                self.assertEqual("[3]", row["unexpected_rounds_json"])
+            finally:
+                connection.close()
+
+    def test_duplicate_game_rounds_remain_quarantined(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            game = _game()
+            game["game_rounds"].append({"round_number": 2})
+            result = self._capture(
+                root,
+                _Opener(
+                    [
+                        lambda url: _Response(url, _catalog()),
+                        lambda url: _Response(url, _players()),
+                        lambda url: _Response(url, _match()),
+                        lambda url: _Response(url, game),
+                    ]
+                ),
+                clock,
+                continue_on_quality_error=True,
+                quarantine_incomplete=True,
+            )
+
+            self.assertIn("game:quarantined", result["task_counts"])
+            connection = sqlite3.connect(root / "state.sqlite3")
+            connection.row_factory = sqlite3.Row
+            try:
+                row = connection.execute(
+                    "SELECT * FROM bo3_game_index WHERE game_id = 101"
+                ).fetchone()
+                self.assertEqual("duplicate_rounds", row["game_quality_class"])
+                self.assertEqual(0, row["game_detail_complete"])
+            finally:
+                connection.close()
+
+    def test_empty_game_rounds_never_claim_full_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            game = _game()
+            game["rounds_count"] = None
+            game["game_rounds"] = []
+            result = self._capture(
+                root,
+                _Opener(
+                    [
+                        lambda url: _Response(url, _catalog()),
+                        lambda url: _Response(url, _players()),
+                        lambda url: _Response(url, _match()),
+                        lambda url: _Response(url, game),
+                    ]
+                ),
+                clock,
+            )
+
+            self.assertEqual(1, result["gaps"]["finished_game_round_gap_count"])
+            connection = sqlite3.connect(root / "state.sqlite3")
+            connection.row_factory = sqlite3.Row
+            try:
+                row = connection.execute(
+                    "SELECT * FROM bo3_game_index WHERE game_id = 101"
+                ).fetchone()
+                self.assertEqual("empty_rounds", row["game_quality_class"])
+                self.assertEqual(0, row["rounds_complete"])
+                self.assertEqual(0.0, row["rounds_coverage"])
+                self.assertEqual("[1,2]", row["missing_rounds_json"])
+            finally:
+                connection.close()
 
     def test_unattended_mode_leaves_network_failure_for_later(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
