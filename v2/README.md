@@ -154,6 +154,7 @@ predic-data capture-bo3-json \
   --window-days 7 \
   --page-limit 100 \
   --profile core \
+  --continue-on-quality-error \
   --max-requests 100
 ```
 
@@ -163,6 +164,10 @@ from bypassing the shared rate limit. Request time is persisted across restarts;
 circuit instead of trying different headers. Successful JSON is written and
 fsynced under `objects/<sha-prefix>/<sha256>.json` before the corresponding task
 and newly discovered child tasks are committed.
+
+For a long unattended pass, `--continue-on-quality-error` leaves incomplete
+payloads in retry/quarantine and continues unrelated work. It never suppresses
+the audit gap and does not override host circuits, `429`, or network stops.
 
 The catalog is split into closed half-open date windows. The first page records
 `total.count`; every expected offset must be captured, and the number of unique

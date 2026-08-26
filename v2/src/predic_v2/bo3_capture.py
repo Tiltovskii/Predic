@@ -1695,6 +1695,7 @@ def capture_bo3(
     profile: str = "core",
     max_requests: int | None = None,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    continue_on_quality_error: bool = False,
     opener: OpenerDirector | Any | None = None,
     now_fn: Callable[[], datetime] = _utc_now,
     sleep_fn: Callable[[float], None] = time.sleep,
@@ -1813,8 +1814,9 @@ def capture_bo3(
                     output_dir=output_path,
                 )
                 if not complete:
-                    stopped_reason = "quality_retry"
-                    break
+                    if not continue_on_quality_error:
+                        stopped_reason = "quality_retry"
+                        break
             except HTTPError as error:
                 if not request_counted:
                     requests += 1
@@ -1858,7 +1860,7 @@ def capture_bo3(
                     policy=policy,
                     now=now_fn().astimezone(timezone.utc),
                 )
-                if status == "retry":
+                if status == "retry" and not continue_on_quality_error:
                     stopped_reason = "quality_retry"
                     break
             except Bo3StorageError as error:

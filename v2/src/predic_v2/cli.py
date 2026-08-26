@@ -269,6 +269,11 @@ def _parser() -> argparse.ArgumentParser:
     capture_bo3_parser.add_argument(
         "--timeout-seconds", type=float, default=30.0,
     )
+    capture_bo3_parser.add_argument(
+        "--continue-on-quality-error",
+        action="store_true",
+        help="keep crawling while incomplete payloads remain queued for retry/audit",
+    )
 
     audit_bo3_parser = subparsers.add_parser(
         "audit-bo3-capture",
@@ -478,6 +483,7 @@ def main() -> None:
             profile=args.profile,
             max_requests=args.max_requests,
             timeout_seconds=args.timeout_seconds,
+            continue_on_quality_error=args.continue_on_quality_error,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         if result["stopped_reason"]:

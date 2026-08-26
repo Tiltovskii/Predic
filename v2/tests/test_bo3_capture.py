@@ -188,6 +188,7 @@ class Bo3CaptureTest(unittest.TestCase):
         max_requests: int = 4,
         stream: str = "history",
         profile: str = "core",
+        continue_on_quality_error: bool = False,
     ) -> dict[str, object]:
         return capture_bo3(
             root / "state.sqlite3",
@@ -198,6 +199,7 @@ class Bo3CaptureTest(unittest.TestCase):
             end_date=date(2020, 6, 16),
             profile=profile,
             max_requests=max_requests,
+            continue_on_quality_error=continue_on_quality_error,
             opener=opener,
             now_fn=clock.now,
             sleep_fn=clock.sleep,
@@ -317,6 +319,28 @@ class Bo3CaptureTest(unittest.TestCase):
                 "expected 10 player rows",
                 result["incomplete_game_samples"][0]["player_quality_error"],
             )
+
+    def test_bulk_mode_keeps_incomplete_player_map_visible_without_stopping(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            result = self._capture(
+                root,
+                _Opener(
+                    [
+                        lambda url: _Response(url, _catalog()),
+                        lambda url: _Response(url, _players(9)),
+                    ]
+                ),
+                clock,
+                max_requests=2,
+                continue_on_quality_error=True,
+            )
+
+            self.assertIsNone(result["stopped_reason"])
+            self.assertFalse(result["ok"])
+            self.assertIn("game_players:retry", result["task_counts"])
+            self.assertEqual(1, result["gaps"]["finished_game_player_gap_count"])
 
     def test_partial_request_budget_resumes_from_child_task(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
