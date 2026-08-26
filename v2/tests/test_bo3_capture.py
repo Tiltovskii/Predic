@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
 import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
@@ -186,6 +187,7 @@ class Bo3CaptureTest(unittest.TestCase):
         *,
         max_requests: int = 4,
         stream: str = "history",
+        profile: str = "core",
     ) -> dict[str, object]:
         return capture_bo3(
             root / "state.sqlite3",
@@ -194,7 +196,7 @@ class Bo3CaptureTest(unittest.TestCase):
             policy_path=self._policy(root),
             start_date=date(2020, 6, 15),
             end_date=date(2020, 6, 16),
-            profile="core",
+            profile=profile,
             max_requests=max_requests,
             opener=opener,
             now_fn=clock.now,
@@ -221,9 +223,9 @@ class Bo3CaptureTest(unittest.TestCase):
             opener = _Opener(
                 [
                     lambda url: _Response(url, _catalog()),
+                    lambda url: _Response(url, _players()),
                     lambda url: _Response(url, _match()),
                     lambda url: _Response(url, _game()),
-                    lambda url: _Response(url, _players()),
                 ]
             )
 
@@ -300,8 +302,6 @@ class Bo3CaptureTest(unittest.TestCase):
             opener = _Opener(
                 [
                     lambda url: _Response(url, _catalog()),
-                    lambda url: _Response(url, _match()),
-                    lambda url: _Response(url, _game()),
                     lambda url: _Response(url, _players(9)),
                 ]
             )
@@ -327,7 +327,7 @@ class Bo3CaptureTest(unittest.TestCase):
                 _Opener(
                     [
                         lambda url: _Response(url, _catalog()),
-                        lambda url: _Response(url, _match()),
+                        lambda url: _Response(url, _players()),
                     ]
                 ),
                 clock,
@@ -336,14 +336,16 @@ class Bo3CaptureTest(unittest.TestCase):
 
             self.assertFalse(first["ok"])
             self.assertEqual(2, first["requests_this_run"])
+            self.assertEqual(10, first["totals"]["player_maps"])
+            self.assertIn("match:pending", first["task_counts"])
             self.assertIn("game:pending", first["task_counts"])
 
             second = self._capture(
                 root,
                 _Opener(
                     [
+                        lambda url: _Response(url, _match()),
                         lambda url: _Response(url, _game()),
-                        lambda url: _Response(url, _players()),
                     ]
                 ),
                 clock,
@@ -353,6 +355,63 @@ class Bo3CaptureTest(unittest.TestCase):
             self.assertTrue(second["ok"])
             self.assertEqual(2, second["requests_this_run"])
             self.assertEqual(10, second["totals"]["player_maps"])
+
+    def test_training_profile_closes_players_without_detail_enrichment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            catalog = _catalog()
+            catalog["results"][0]["status"] = None
+            catalog["results"][0]["parsed_status"] = None
+            result = self._capture(
+                root,
+                _Opener(
+                    [
+                        lambda url: _Response(url, catalog),
+                        lambda url: _Response(url, _players()),
+                    ]
+                ),
+                clock,
+                max_requests=2,
+                profile="training",
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(10, result["totals"]["player_maps"])
+            self.assertNotIn("match:pending", result["task_counts"])
+            self.assertNotIn("game:pending", result["task_counts"])
+
+    def test_resume_backfills_player_first_tasks_for_old_core_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            self._capture(
+                root,
+                _Opener([lambda url: _Response(url, _catalog())]),
+                clock,
+                max_requests=1,
+            )
+            with sqlite3.connect(root / "state.sqlite3") as connection:
+                connection.execute(
+                    "DELETE FROM bo3_task WHERE kind IN ('game', 'game_players')"
+                )
+                connection.execute(
+                    """
+                    UPDATE bo3_game_index
+                    SET stats_expected = 0, status = NULL, rounds_count = NULL
+                    """
+                )
+
+            result = self._capture(
+                root,
+                _Opener([lambda url: _Response(url, _players())]),
+                clock,
+                max_requests=1,
+            )
+
+            self.assertEqual(10, result["totals"]["player_maps"])
+            self.assertIn("game:pending", result["task_counts"])
+            self.assertNotIn("game_players:pending", result["task_counts"])
 
     def test_stream_configuration_cannot_change_on_resume(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

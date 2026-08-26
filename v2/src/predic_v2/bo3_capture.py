@@ -32,12 +32,20 @@ from .hltv_capture import (
 CAPTURE_VERSION = "bo3-api-capture-v1"
 API_ROOT = "https://api.bo3.gg/api/v1"
 DEFAULT_TIMEOUT_SECONDS = 30.0
-PROFILE_LEVEL = {"catalog": 0, "core": 1, "rich": 2, "exhaustive": 3}
+PROFILE_LEVEL = {
+    "catalog": 0,
+    "training": 1,
+    "core": 2,
+    "rich": 3,
+    "exhaustive": 4,
+}
 TASK_PRIORITY = {
     "catalog": 10,
-    "match": 20,
-    "game": 30,
-    "game_players": 40,
+    # Player timelines are the first useful training artifact. The endpoint is
+    # independent of game detail, so capture it before slower enrichment.
+    "game_players": 20,
+    "match": 30,
+    "game": 40,
     "game_kills_matrix": 50,
     "game_flashes_matrix": 51,
     "game_grenades_stats": 52,
@@ -561,6 +569,68 @@ def _seed_job(
             },
         )
         cursor = stop
+
+    # Priority is execution policy, not source identity. Refresh it on resume so
+    # an existing checkpoint adopts newer scheduling without changing any URL.
+    for kind, priority in TASK_PRIORITY.items():
+        connection.execute(
+            "UPDATE bo3_task SET priority = ? WHERE stream = ? AND kind = ?",
+            (priority, stream, kind),
+        )
+
+    effective_profile = str(
+        connection.execute(
+            "SELECT profile FROM bo3_capture_job WHERE stream = ?", (stream,)
+        ).fetchone()[0]
+    )
+    historical_finished_scope = set(statuses).issubset({"finished", "defwin"})
+    if historical_finished_scope:
+        # Older BO3 catalog rows can omit match status even though they were
+        # returned by the finished/defwin server filter. Positive round/game
+        # evidence is sufficient to recover those already persisted stubs.
+        connection.execute(
+            """
+            UPDATE bo3_game_index
+            SET stats_expected = 1
+            WHERE stream = ? AND stats_expected = 0
+              AND (map_name IS NOT NULL OR rounds_count > 0 OR status = 'finished')
+            """,
+            (stream,),
+        )
+    if PROFILE_LEVEL[effective_profile] >= PROFILE_LEVEL["training"]:
+        # Older core checkpoints only created this task after game detail. Seed
+        # it directly from catalog stubs so player timelines can be completed
+        # first without re-downloading the catalog.
+        for game in connection.execute(
+            """
+            SELECT game_id, match_id FROM bo3_game_index
+            WHERE stream = ? AND stats_expected = 1
+            ORDER BY game_id
+            """,
+            (stream,),
+        ):
+            game_id = int(game["game_id"])
+            _insert_task(
+                connection,
+                stream=stream,
+                task_key=f"game_players:{game_id}",
+                kind="game_players",
+                source_id=str(game_id),
+                url=_task_url("game_players", str(game_id)),
+                now=now_text,
+                metadata={"game_id": game_id, "match_id": int(game["match_id"])},
+            )
+            if PROFILE_LEVEL[effective_profile] >= PROFILE_LEVEL["core"]:
+                _insert_task(
+                    connection,
+                    stream=stream,
+                    task_key=f"game:{game_id}",
+                    kind="game",
+                    source_id=str(game_id),
+                    url=_task_url("game", str(game_id)),
+                    now=now_text,
+                    metadata={"game_id": game_id, "match_id": int(game["match_id"])},
+                )
     connection.commit()
 
 
@@ -898,7 +968,8 @@ def _upsert_match(
         ),
     )
 
-    if PROFILE_LEVEL[_profile(connection, stream)] >= PROFILE_LEVEL["core"]:
+    profile = _profile(connection, stream)
+    if PROFILE_LEVEL[profile] >= PROFILE_LEVEL["core"]:
         _insert_task(
             connection,
             stream=stream,
@@ -915,6 +986,17 @@ def _upsert_match(
             },
             parent_task_key=parent_task_key,
         )
+    catalog_finished_scope = (
+        not detail_complete
+        and set(
+            str(
+                connection.execute(
+                    "SELECT statuses FROM bo3_capture_job WHERE stream = ?",
+                    (stream,),
+                ).fetchone()[0]
+            ).split(",")
+        ).issubset({"finished", "defwin"})
+    )
     games = payload.get("games") or []
     if not isinstance(games, list):
         raise Bo3QualityError("match.games must be an array or null")
@@ -927,8 +1009,9 @@ def _upsert_match(
             match_id=match_id,
             payload=game,
             parent_finished=(
-                payload.get("status") == "finished"
+                payload.get("status") in {"finished", "defwin"}
                 or str(payload.get("parsed_status") or "") == "done"
+                or catalog_finished_scope
             ),
             snapshot_id=snapshot_id,
             now=now,
@@ -990,10 +1073,20 @@ def _upsert_game_stub(
             snapshot_id,
         ),
     )
-    if (
-        stats_expected
-        and PROFILE_LEVEL[_profile(connection, stream)] >= PROFILE_LEVEL["core"]
-    ):
+    profile = _profile(connection, stream)
+    if stats_expected and PROFILE_LEVEL[profile] >= PROFILE_LEVEL["training"]:
+        _insert_task(
+            connection,
+            stream=stream,
+            task_key=f"game_players:{game_id}",
+            kind="game_players",
+            source_id=str(game_id),
+            url=_task_url("game_players", str(game_id)),
+            now=now,
+            metadata={"game_id": game_id, "match_id": match_id},
+            parent_task_key=parent_task_key,
+        )
+    if stats_expected and PROFILE_LEVEL[profile] >= PROFILE_LEVEL["core"]:
         _insert_task(
             connection,
             stream=stream,
@@ -1810,6 +1903,9 @@ def audit_bo3_capture(
         ).fetchone()
         if job is None:
             raise ValueError(f"unknown BO3 stream: {stream}")
+        requires_game_detail = int(
+            PROFILE_LEVEL[str(job["profile"])] >= PROFILE_LEVEL["core"]
+        )
         task_counts = {
             f"{row['kind']}:{row['status']}": int(row["count"])
             for row in connection.execute(
@@ -1862,14 +1958,15 @@ def audit_bo3_capture(
               AND g.stats_expected = 1
               AND (
                   g.map_name IS NULL
-                  OR g.game_detail_complete = 0 OR g.players_complete = 0
+                  OR (? = 1 AND g.game_detail_complete = 0)
+                  OR g.players_complete = 0
                   OR g.player_rows <> 10 OR g.distinct_players <> 10
                   OR g.distinct_teams <> 2
               )
             ORDER BY m.start_date, g.match_id, g.map_number
             LIMIT ?
             """,
-            (stream, max_samples),
+            (stream, requires_game_detail, max_samples),
         ).fetchall()
         identity_conflicts = connection.execute(
             """
@@ -1926,12 +2023,13 @@ def audit_bo3_capture(
                       AND g.stats_expected = 1
                       AND (
                           g.map_name IS NULL
-                          OR g.game_detail_complete = 0 OR g.players_complete = 0
+                          OR (? = 1 AND g.game_detail_complete = 0)
+                          OR g.players_complete = 0
                           OR g.player_rows <> 10 OR g.distinct_players <> 10
                           OR g.distinct_teams <> 2
                       )
                     """,
-                    (stream,),
+                    (stream, requires_game_detail),
                 ).fetchone()[0]
             ),
             "steam_identity_conflict_count": int(

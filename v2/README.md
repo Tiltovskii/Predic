@@ -175,6 +175,13 @@ details and played game IDs. The `core` profile then captures:
 3. `/games/{id}/players_stats`, including Steam profile/SteamID64, historical
    team binding, and player-map metrics.
 
+For a time-boxed first pass, `--profile training` captures the complete catalog
+and schedules every played map's player statistics immediately, while deferring
+match detail, round/economy detail, demos, vetoes, and odds. In every profile
+above `catalog`, player-stat tasks run before detail enrichment. Existing `core`
+checkpoints adopt this player-first scheduling on resume, so the catalog is not
+downloaded again and the full detail queue remains available for a later pass.
+
 A finished map is not complete merely because its HTTP requests returned 200.
 The quality gate requires ten distinct Steam profiles, two teams of five, and
 non-null kills, deaths, assists, damage, ADR, and KAST. Partial responses remain
@@ -183,14 +190,15 @@ with:
 
 ```bash
 predic-data audit-bo3-capture \
-  --state-db data/bo3-history-state.sqlite3 \
-  --stream bo3-history-2020-2026-v1
+  --state-db data/bo3-history-v2-state.sqlite3 \
+  --stream bo3-history-2020-2026-v2
 ```
 
 `rich` additionally schedules kill/flash matrices plus grenade, hit-group, and
 weapon endpoints. `exhaustive` also schedules player stats for every round and
 can create several million requests, so it should only be enabled as a later
-targeted enrichment. The first full pass should remain `core`; demo URLs make
+targeted enrichment. Use `training` when player timelines must land first and
+resume as `core` to fill all details; demo URLs make
 it possible to repair source gaps and derive event-level features later.
 
 Upcoming/current matches belong in separate immutable snapshot streams, for

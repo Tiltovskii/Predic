@@ -241,7 +241,7 @@ def _parser() -> argparse.ArgumentParser:
     plan_bo3_parser.add_argument("--window-days", type=int, default=7)
     plan_bo3_parser.add_argument("--page-limit", type=int, default=100)
     plan_bo3_parser.add_argument(
-        "--profile", choices=("catalog", "core", "rich", "exhaustive"),
+        "--profile", choices=("catalog", "training", "core", "rich", "exhaustive"),
         default="core",
     )
 
@@ -262,7 +262,7 @@ def _parser() -> argparse.ArgumentParser:
     capture_bo3_parser.add_argument("--window-days", type=int, default=7)
     capture_bo3_parser.add_argument("--page-limit", type=int, default=100)
     capture_bo3_parser.add_argument(
-        "--profile", choices=("catalog", "core", "rich", "exhaustive"),
+        "--profile", choices=("catalog", "training", "core", "rich", "exhaustive"),
         default="core",
     )
     capture_bo3_parser.add_argument("--max-requests", type=int)
