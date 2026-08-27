@@ -385,6 +385,9 @@ def _parser() -> argparse.ArgumentParser:
     baseline_train_parser.add_argument("--train-before", default="2025-01-01")
     baseline_train_parser.add_argument("--test-from", default="2026-01-01")
     baseline_train_parser.add_argument("--iterations", type=int, default=900)
+    baseline_train_parser.add_argument(
+        "--feature-set", choices=("base", "core", "all"), default="core"
+    )
 
     walk_forward_parser = subparsers.add_parser(
         "backtest-catboost-walk-forward",
@@ -395,6 +398,9 @@ def _parser() -> argparse.ArgumentParser:
     walk_forward_parser.add_argument("--test-from", default="2026-01-01")
     walk_forward_parser.add_argument("--validation-days", type=int, default=90)
     walk_forward_parser.add_argument("--iterations", type=int, default=900)
+    walk_forward_parser.add_argument(
+        "--feature-set", choices=("base", "core", "all"), default="core"
+    )
     return parser
 
 
@@ -658,6 +664,7 @@ def main() -> None:
             train_before=args.train_before,
             test_from=args.test_from,
             iterations=args.iterations,
+            feature_set=args.feature_set,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return
@@ -668,6 +675,7 @@ def main() -> None:
             test_from=args.test_from,
             validation_days=args.validation_days,
             iterations=args.iterations,
+            feature_set=args.feature_set,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return

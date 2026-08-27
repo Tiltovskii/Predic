@@ -1,0 +1,124 @@
+{
+  "data": {
+    "finished_matches": 73282,
+    "source_range": ["2020-06-15", "2026-08-26"],
+    "excluded_defwin": 3696,
+    "excluded_missing_end_at": 5,
+    "non_positive_duration_not_applied_to_state": 75,
+    "teams": 4058,
+    "players": 9218,
+    "both_lineups_full5_rate": 0.6644878688,
+    "feature_columns_materialized": 1177
+  },
+  "point_in_time_fixes": [
+    "results update state at end_at rather than start_at",
+    "rows without end_at are skipped; positive end_at is retained and non-positive durations never update causal state",
+    "simultaneous and overlapping matches do not see unfinished results",
+    "training folds require known_at strictly before their cutoff",
+    "unknown map and round results no longer update performance counters",
+    "round-share smoothing is centered at 0.5 and carries support counts",
+    "H2H features mirror with both sides and a signed difference",
+    "current_is_coach is not used as a historical lineup filter",
+    "administrative defwin matches are excluded"
+  ],
+  "static_2026": {
+    "rows": 9581,
+    "base_156_features": {
+      "accuracy": 0.6673624883,
+      "roc_auc": 0.7207221149,
+      "logloss": 0.6133088804,
+      "brier": 0.2122889518,
+      "ece_10bin": 0.0319463745
+    },
+    "core_762_features": {
+      "accuracy": 0.6695543263,
+      "roc_auc": 0.7251487236,
+      "logloss": 0.6091067833,
+      "brier": 0.2105164250,
+      "ece_10bin": 0.0275894668
+    },
+    "all_1164_features": {
+      "accuracy": 0.6679887277,
+      "roc_auc": 0.7256779597,
+      "logloss": 0.6089900752,
+      "brier": 0.2104477942,
+      "ece_10bin": 0.0267745742
+    },
+    "core_round_share_regression": {
+      "rows": 8948,
+      "mae": 0.0999543102,
+      "rmse": 0.1284229556,
+      "winner_accuracy_at_0_5": 0.6707644166
+    },
+    "core_bo3_score": {
+      "rows": 7367,
+      "exact_accuracy": 0.4370842948,
+      "multiclass_logloss": 1.2465631584,
+      "implied_winner_accuracy": 0.6696077101,
+      "implied_winner_roc_auc": 0.7285727804,
+      "implied_winner_logloss": 0.6019098377
+    }
+  },
+  "monthly_walk_forward_2026": {
+    "protocol": "monthly full refit; 90-day past-only tuning window",
+    "base_156_features": {
+      "accuracy": 0.6680931009,
+      "roc_auc": 0.7305836457,
+      "logloss": 0.6000686759,
+      "brier": 0.2074085348,
+      "ece_10bin": 0.0131516618
+    },
+    "core_762_features": {
+      "accuracy": 0.6740423755,
+      "roc_auc": 0.7323708427,
+      "logloss": 0.5986234179,
+      "brier": 0.2067542458,
+      "ece_10bin": 0.0071226392
+    },
+    "core_accuracy_by_month": {
+      "2026-01": 0.6576032226,
+      "2026-02": 0.6891064871,
+      "2026-03": 0.6721698113,
+      "2026-04": 0.6994459834,
+      "2026-05": 0.6661807580,
+      "2026-06": 0.6709219858,
+      "2026-07": 0.6354166667,
+      "2026-08": 0.6749226006
+    }
+  },
+  "core_walk_forward_slices": {
+    "both_lineups_full5": {
+      "rows": 7310,
+      "accuracy": 0.6800,
+      "roc_auc": 0.7391,
+      "logloss": 0.5914
+    },
+    "lineup_missing_or_partial": {
+      "rows": 2271,
+      "accuracy": 0.6548,
+      "roc_auc": 0.7103,
+      "logloss": 0.6219
+    },
+    "lan": {
+      "rows": 2543,
+      "accuracy": 0.7224,
+      "roc_auc": 0.7861,
+      "logloss": 0.5443
+    },
+    "online": {
+      "rows": 7038,
+      "accuracy": 0.6566,
+      "roc_auc": 0.7107,
+      "logloss": 0.6182
+    }
+  },
+  "leading_new_features": [
+    "EWMA opponent strength",
+    "minimum player experience in the lineup",
+    "EWMA team win and round-share form",
+    "current-tier and venue-specific form",
+    "map-pool depth",
+    "global and organization-specific pair experience",
+    "within-tournament form"
+  ]
+}

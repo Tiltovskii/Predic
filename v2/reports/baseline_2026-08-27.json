@@ -1,4 +1,7 @@
 {
+  "status": "superseded",
+  "superseded_by": "counters_2026-08-27.json",
+  "superseded_reason": "The first run included defwin rows and updated causal state at start_at instead of end_at.",
   "data": {
     "matches": 76983,
     "source_range": ["2020-06-15", "2026-08-26"],

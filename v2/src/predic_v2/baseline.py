@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import bisect
 import csv
+import heapq
 import json
 import math
 import re
@@ -13,6 +14,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from .counters import EnrichedCounterStore
 
 _STREAM = "bo3-history-2020-2026-v2"
 _WINDOWS = (30, 90, 180)
@@ -140,18 +143,20 @@ def _load_lineups(
         FROM bo3_player_map_index AS p
         JOIN bo3_game_index AS g
           ON g.stream = p.stream AND g.game_id = p.game_id
-        WHERE p.stream = ? AND COALESCE(p.current_is_coach, 0) = 0
+        WHERE p.stream = ?
         GROUP BY g.match_id, p.team_id, p.steam_profile_id
-        ORDER BY g.match_id, p.team_id, maps_played DESC,
-                 rounds_played DESC, p.steam_profile_id
+        ORDER BY g.match_id, p.team_id, rounds_played DESC,
+                 maps_played DESC, p.steam_profile_id
         """,
         (stream,),
     )
     grouped: dict[tuple[int, int], list[tuple[int, str]]] = defaultdict(list)
     for match_id, team_id, player_id, nickname, _, _ in rows:
         grouped[(int(match_id), int(team_id))].append((int(player_id), str(nickname)))
-    # Keep the five principal participants. Matches with substitutions retain
-    # the players who appeared on the most maps/rounds due to query ordering.
+    # Keep the five principal participants. `current_is_coach` is deliberately
+    # ignored: it describes the profile now, not that player's historical role.
+    # With substitutions/coach rows, query ordering retains the five who
+    # participated in the most rounds, then maps.
     return {
         key: tuple(f"{player_id}:{nickname}" for player_id, nickname in players[:5])
         for key, players in grouped.items()
@@ -178,7 +183,7 @@ def extract_bo3_match_table(
         FROM bo3_match_index AS m
         JOIN bo3_snapshot AS s ON s.snapshot_id = m.last_snapshot_id
         JOIN bo3_capture_job AS j ON j.stream = m.stream
-        WHERE m.stream = ? AND m.detail_complete = 1
+        WHERE m.stream = ? AND m.detail_complete = 1 AND m.status = 'finished'
         ORDER BY m.start_date, m.match_id
         """,
         (stream,),
@@ -186,6 +191,7 @@ def extract_bo3_match_table(
     fields = [
         "match_id",
         "start_at",
+        "end_at",
         "team1_id",
         "team1_name",
         "team1_roster",
@@ -201,6 +207,9 @@ def extract_bo3_match_table(
         "tournament_tier",
         "tournament_tier_rank",
         "event_type",
+        "round_index",
+        "bracket_type",
+        "is_decider",
         "prize",
         "maps_played",
         "team1_map_wins",
@@ -208,6 +217,7 @@ def extract_bo3_match_table(
         "team1_rounds",
         "team2_rounds",
         "rounds_known",
+        "map_results",
         "score_label",
     ]
     skipped = defaultdict(int)
@@ -225,6 +235,10 @@ def extract_bo3_match_table(
                 continue
             team1 = payload.get("team1") or {}
             team2 = payload.get("team2") or {}
+            end_at = payload.get("end_date") or row["end_date"]
+            if not end_at:
+                skipped["missing_end_at"] += 1
+                continue
             team1_id = int(team1.get("id") or row["team1_id"] or 0)
             team2_id = int(team2.get("id") or row["team2_id"] or 0)
             winner_id = payload.get("winner_team_id")
@@ -241,6 +255,7 @@ def extract_bo3_match_table(
             ]
             map_wins = {team1_id: 0, team2_id: 0}
             team_rounds = {team1_id: 0, team2_id: 0}
+            map_results: list[dict[str, object]] = []
             rounds_known = True
             for game in games:
                 winner = ((game.get("winner_team_clan") or {}).get("team") or {}).get(
@@ -253,6 +268,16 @@ def extract_bo3_match_table(
                     map_wins[int(winner)] += 1
                 winner_score = game.get("winner_clan_score")
                 loser_score = game.get("loser_clan_score")
+                if winner in team_rounds and loser in team_rounds:
+                    map_results.append(
+                        {
+                            "map_name": game.get("map_name") or "unknown",
+                            "winner_team_id": int(winner),
+                            "loser_team_id": int(loser),
+                            "winner_score": winner_score,
+                            "loser_score": loser_score,
+                        }
+                    )
                 if (
                     winner in team_rounds
                     and loser in team_rounds
@@ -267,10 +292,12 @@ def extract_bo3_match_table(
             if games and sum(map_wins.values()) == len(games):
                 score_label = f"{map_wins[team1_id]}-{map_wins[team2_id]}"
             tournament = payload.get("tournament") or {}
+            tournament_round = payload.get("round") or {}
             writer.writerow(
                 {
                     "match_id": int(row["match_id"]),
                     "start_at": payload.get("start_date") or row["start_date"],
+                    "end_at": end_at,
                     "team1_id": team1_id,
                     "team1_name": team1.get("name") or str(team1_id),
                     "team1_roster": json.dumps(
@@ -294,6 +321,9 @@ def extract_bo3_match_table(
                     ).casefold(),
                     "tournament_tier_rank": tournament.get("tier_rank") or 0,
                     "event_type": tournament.get("event_type") or "unknown",
+                    "round_index": tournament_round.get("round_index") or 0,
+                    "bracket_type": tournament_round.get("bracket_type") or "unknown",
+                    "is_decider": int(bool(tournament_round.get("is_decider"))),
                     "prize": tournament.get("prize") or 0,
                     "maps_played": len(games),
                     "team1_map_wins": map_wins[team1_id],
@@ -301,6 +331,7 @@ def extract_bo3_match_table(
                     "team1_rounds": team_rounds[team1_id] if rounds_known else "",
                     "team2_rounds": team_rounds[team2_id] if rounds_known else "",
                     "rounds_known": int(rounds_known and bool(games)),
+                    "map_results": json.dumps(map_results, separators=(",", ":")),
                     "score_label": score_label,
                 }
             )
@@ -326,8 +357,8 @@ def extract_bo3_match_table(
 class _Outcome:
     at: datetime
     win: float
-    map_win_rate: float
-    round_share: float
+    map_win_rate: float | None
+    round_share: float | None
     opponent_elo: float
 
 
@@ -348,6 +379,21 @@ class _PlayerState:
     matches: int = 0
     wins: float = 0.0
     last_at: datetime | None = None
+
+
+@dataclass
+class _PendingMatchUpdate:
+    known_at: datetime
+    match: dict[str, str]
+    roster1: tuple[str, ...]
+    roster2: tuple[str, ...]
+    signature1: tuple[str, ...]
+    signature2: tuple[str, ...]
+    team1_elo: float
+    team2_elo: float
+    team1_elo_delta: float
+    player_deltas1: tuple[tuple[str, float], ...]
+    player_deltas2: tuple[tuple[str, float], ...]
 
 
 def _smoothed_rate(successes: float, total: float) -> float:
@@ -376,14 +422,20 @@ def _team_features(state: _TeamState, at: datetime) -> dict[str, float]:
         result[f"win_rate_{window}d"] = _smoothed_rate(
             sum(item.win for item in recent), count
         )
+        known_maps = [
+            item.map_win_rate for item in recent if item.map_win_rate is not None
+        ]
         result[f"map_win_rate_{window}d"] = _smoothed_rate(
-            sum(item.map_win_rate for item in recent), count
+            sum(known_maps), len(known_maps)
         )
-        result[f"round_share_{window}d"] = (
-            (sum(item.round_share for item in recent) + count) / (2 * count)
-            if count
-            else 0.5
+        result[f"map_win_rate_matches_{window}d"] = float(len(known_maps))
+        known_rounds = [
+            item.round_share for item in recent if item.round_share is not None
+        ]
+        result[f"round_share_{window}d"] = _smoothed_rate(
+            sum(known_rounds), len(known_rounds)
         )
+        result[f"round_share_matches_{window}d"] = float(len(known_rounds))
         result[f"opponent_elo_{window}d"] = (
             sum(item.opponent_elo for item in recent) / count if count else 1500.0
         )
@@ -439,6 +491,7 @@ def build_point_in_time_features(
     rankings_csv: str | Path | None = None,
 ) -> dict[str, object]:
     ranking_index = ExternalRankingIndex(rankings_csv)
+    enriched_counters = EnrichedCounterStore()
     with Path(matches_csv).open(encoding="utf-8", newline="") as source:
         matches = list(csv.DictReader(source))
     matches.sort(key=lambda row: (row["start_at"], int(row["match_id"])))
@@ -448,9 +501,100 @@ def build_point_in_time_features(
     pair_counts: dict[tuple[int, str, str], int] = defaultdict(int)
     h2h: dict[tuple[int, int], deque[tuple[datetime, int]]] = defaultdict(deque)
     feature_rows: list[dict[str, object]] = []
+    pending_updates: list[tuple[datetime, int, _PendingMatchUpdate]] = []
+
+    def apply_update(pending: _PendingMatchUpdate) -> None:
+        match = pending.match
+        known_at = pending.known_at
+        team1_id, team2_id = int(match["team1_id"]), int(match["team2_id"])
+        team1, team2 = teams[team1_id], teams[team2_id]
+        outcome1 = int(match["team1_win"])
+        enriched_counters.update(
+            match,
+            known_at,
+            pending.roster1,
+            pending.roster2,
+            team1_elo=pending.team1_elo,
+            team2_elo=pending.team2_elo,
+            team1_elo_delta=pending.team1_elo_delta,
+        )
+        team1.elo += pending.team1_elo_delta
+        team2.elo -= pending.team1_elo_delta
+        map_total = int(match["team1_map_wins"]) + int(match["team2_map_wins"])
+        map_result_valid = map_total > 0 and map_total == int(match["maps_played"])
+        map_rate1 = (
+            int(match["team1_map_wins"]) / map_total if map_result_valid else None
+        )
+        map_rate2 = None if map_rate1 is None else 1.0 - map_rate1
+        round_share1: float | None = None
+        if int(match["rounds_known"]):
+            rounds1, rounds2 = int(match["team1_rounds"]), int(match["team2_rounds"])
+            if rounds1 + rounds2:
+                round_share1 = rounds1 / (rounds1 + rounds2)
+        for state, win, map_rate, round_share, opponent_elo in (
+            (team1, float(outcome1), map_rate1, round_share1, pending.team2_elo),
+            (
+                team2,
+                float(1 - outcome1),
+                map_rate2,
+                None if round_share1 is None else 1.0 - round_share1,
+                pending.team1_elo,
+            ),
+        ):
+            state.matches += 1
+            state.wins += win
+            if map_rate is not None:
+                state.maps_won += round(map_rate * map_total)
+                state.maps_played += map_total
+            state.last_at = known_at
+            state.outcomes.append(
+                _Outcome(known_at, win, map_rate, round_share, opponent_elo)
+            )
+            while (
+                state.outcomes
+                and (known_at - state.outcomes[0].at).total_seconds() >= 365 * 86_400
+            ):
+                state.outcomes.popleft()
+        for side_deltas, win in (
+            (pending.player_deltas1, outcome1),
+            (pending.player_deltas2, 1 - outcome1),
+        ):
+            for player_id, delta in side_deltas:
+                state = players[player_id]
+                state.elo += delta
+                state.matches += 1
+                state.wins += win
+                state.last_at = known_at
+        for team_id, roster, signature in (
+            (team1_id, pending.roster1, pending.signature1),
+            (team2_id, pending.roster2, pending.signature2),
+        ):
+            if signature:
+                lineup_counts[(team_id, signature)] += 1
+            ids = sorted(player.split(":", 1)[0] for player in roster)
+            for left in range(len(ids)):
+                for right in range(left + 1, len(ids)):
+                    pair_counts[(team_id, ids[left], ids[right])] += 1
+        pair_key = tuple(sorted((team1_id, team2_id)))
+        h2h[pair_key].append(
+            (
+                known_at,
+                outcome1 if pair_key[0] == team1_id else 1 - outcome1,
+            )
+        )
+        while (
+            h2h[pair_key]
+            and (known_at - h2h[pair_key][0][0]).total_seconds() >= 365 * 86_400
+        ):
+            h2h[pair_key].popleft()
 
     for index, match in enumerate(matches, start=1):
         at = _parse_time(match["start_at"])
+        raw_end_at = _parse_time(match["end_at"])
+        known_at = raw_end_at if raw_end_at > at else None
+        while pending_updates and pending_updates[0][0] <= at:
+            _, _, pending = heapq.heappop(pending_updates)
+            apply_update(pending)
         team1_id, team2_id = int(match["team1_id"]), int(match["team2_id"])
         team1, team2 = teams[team1_id], teams[team2_id]
         roster1, roster2 = (
@@ -464,6 +608,9 @@ def build_point_in_time_features(
         features: dict[str, object] = {
             "match_id": int(match["match_id"]),
             "start_at": match["start_at"],
+            # Label-availability metadata. It is excluded from every model input
+            # and is used only to enforce temporal training cutoffs.
+            "known_at": known_at.isoformat() if known_at is not None else "",
             "team1_id": str(team1_id),
             "team2_id": str(team2_id),
             "team1_name": match["team1_name"],
@@ -472,6 +619,9 @@ def build_point_in_time_features(
             "game_version": str(match["game_version"]),
             "tournament_tier": match["tournament_tier"],
             "event_type": match["event_type"],
+            "bracket_type": match.get("bracket_type") or "unknown",
+            "round_index": float(match.get("round_index") or 0),
+            "is_decider": int(match.get("is_decider") or 0),
             "tournament_tier_rank": float(match["tournament_tier_rank"] or 0),
             "log_prize": math.log1p(float(match["prize"] or 0)),
             "year": at.year,
@@ -544,9 +694,10 @@ def build_point_in_time_features(
             result if pair_key[0] == team1_id else 1 - result for _, result in prior_h2h
         )
         features["h2h_matches_365d"] = len(prior_h2h)
-        features["team1_h2h_win_rate_365d"] = _smoothed_rate(
-            team1_h2h_wins, len(prior_h2h)
-        )
+        team1_h2h_rate = _smoothed_rate(team1_h2h_wins, len(prior_h2h))
+        features["team1_h2h_win_rate_365d"] = team1_h2h_rate
+        features["team2_h2h_win_rate_365d"] = 1.0 - team1_h2h_rate
+        features["diff_h2h_win_rate_365d"] = 2.0 * team1_h2h_rate - 1.0
 
         for system in ("valve_regional", "valve_global"):
             rank1 = ranking_index.lookup(
@@ -567,9 +718,12 @@ def build_point_in_time_features(
             features[f"diff_{short}_rank"] = rank2["rank"] - rank1["rank"]
             features[f"diff_{short}_points"] = rank1["points"] - rank2["points"]
 
+        features.update(enriched_counters.features(match, at, roster1, roster2))
+
         feature_rows.append(features)
 
-        # State updates happen only after the feature row has been frozen.
+        # The result becomes eligible only when the match has ended. This also
+        # freezes simultaneous/overlapping matches against one another.
         outcome1 = int(match["team1_win"])
         expected1 = 1.0 / (1.0 + 10.0 ** ((team2.elo - team1.elo) / 400.0))
         tier_weight = _TIER_WEIGHTS.get(
@@ -583,70 +737,47 @@ def build_point_in_time_features(
             * (outcome1 - expected1)
         )
         pre1, pre2 = team1.elo, team2.elo
-        team1.elo += delta
-        team2.elo -= delta
-        map_total = int(match["team1_map_wins"]) + int(match["team2_map_wins"])
-        map_rate1 = (
-            int(match["team1_map_wins"]) / map_total if map_total else float(outcome1)
-        )
-        map_rate2 = 1.0 - map_rate1
-        if int(match["rounds_known"]):
-            rounds1, rounds2 = int(match["team1_rounds"]), int(match["team2_rounds"])
-            round_share1 = rounds1 / (rounds1 + rounds2) if rounds1 + rounds2 else 0.5
-        else:
-            round_share1 = 0.5
-        for state, win, map_rate, round_share, opponent_elo in (
-            (team1, float(outcome1), map_rate1, round_share1, pre2),
-            (team2, float(1 - outcome1), map_rate2, 1.0 - round_share1, pre1),
-        ):
-            state.matches += 1
-            state.wins += win
-            state.maps_won += round(map_rate * map_total)
-            state.maps_played += map_total
-            state.last_at = at
-            state.outcomes.append(
-                _Outcome(at, win, map_rate, round_share, opponent_elo)
-            )
-            while (
-                state.outcomes
-                and (at - state.outcomes[0].at).total_seconds() >= 365 * 86_400
-            ):
-                state.outcomes.popleft()
+        player_deltas: list[tuple[tuple[str, float], ...]] = []
         for roster, win, opponent_mean in (
             (roster1, outcome1, player2["player_elo_mean"]),
             (roster2, 1 - outcome1, player1["player_elo_mean"]),
         ):
+            side_deltas: list[tuple[str, float]] = []
             for player in roster:
                 player_id = player.split(":", 1)[0]
                 state = players[player_id]
                 expected = 1.0 / (1.0 + 10.0 ** ((opponent_mean - state.elo) / 400.0))
-                state.elo += 16.0 * (win - expected)
-                state.matches += 1
-                state.wins += win
-                state.last_at = at
-        for team_id, roster, signature in (
-            (team1_id, roster1, signature1),
-            (team2_id, roster2, signature2),
-        ):
-            if signature:
-                lineup_counts[(team_id, signature)] += 1
-            ids = sorted(player.split(":", 1)[0] for player in roster)
-            for left in range(len(ids)):
-                for right in range(left + 1, len(ids)):
-                    pair_counts[(team_id, ids[left], ids[right])] += 1
-        h2h[pair_key].append(
-            (at, outcome1 if pair_key[0] == team1_id else 1 - outcome1)
-        )
-        while (
-            h2h[pair_key] and (at - h2h[pair_key][0][0]).total_seconds() >= 365 * 86_400
-        ):
-            h2h[pair_key].popleft()
+                side_deltas.append((player_id, 16.0 * (win - expected)))
+            player_deltas.append(tuple(side_deltas))
+        # A positive recorded end time is kept even when the series is unusually
+        # long. Moving it earlier would expose the result before it was known.
+        # Non-positive durations cannot be ordered safely, so their result never
+        # updates causal state (the row can still be evaluated as a prediction).
+        if known_at is not None:
+            pending = _PendingMatchUpdate(
+                known_at=known_at,
+                match=match,
+                roster1=roster1,
+                roster2=roster2,
+                signature1=tuple(sorted(player.split(":", 1)[0] for player in roster1)),
+                signature2=tuple(sorted(player.split(":", 1)[0] for player in roster2)),
+                team1_elo=pre1,
+                team2_elo=pre2,
+                team1_elo_delta=delta,
+                player_deltas1=player_deltas[0],
+                player_deltas2=player_deltas[1],
+            )
+            heapq.heappush(pending_updates, (known_at, index, pending))
         if index % 10_000 == 0:
             print(
                 f"built {index}/{len(matches)} feature rows",
                 file=sys.stderr,
                 flush=True,
             )
+
+    while pending_updates:
+        _, _, pending = heapq.heappop(pending_updates)
+        apply_update(pending)
 
     output = Path(output_csv).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -778,6 +909,59 @@ def _mirror(frame: Any, feature_columns: list[str]) -> Any:
     return mirrored
 
 
+def _select_feature_columns(
+    frame: Any, excluded: set[str], feature_set: str
+) -> list[str]:
+    columns = [column for column in frame.columns if column not in excluded]
+    if feature_set == "all":
+        return columns
+    if feature_set == "base":
+        return [
+            column
+            for column in columns
+            if "_counter_" not in column and not column.startswith("counter_")
+        ]
+    if feature_set != "core":
+        raise ValueError(f"unknown feature set: {feature_set}")
+    support_tokens = (
+        "matches",
+        "known",
+        "effective",
+        "roster_size",
+        "roster_full5",
+        "newcomers",
+        "days_since",
+        "tenure",
+        "inactivity",
+        "maps_played",
+        "map_pool_maps",
+        "map_pool_games",
+    )
+    result: list[str] = []
+    for column in columns:
+        is_counter = "_counter_" in column or column.startswith("counter_")
+        if (
+            not is_counter
+            or column.startswith(("diff_counter_", "counter_"))
+            or any(token in column for token in support_tokens)
+        ):
+            result.append(column)
+    return result
+
+
+def _labels_known_before(frame: Any, cutoff: Any) -> Any:
+    """Return only rows whose result timestamp is strictly before a cutoff."""
+    return frame[frame["known_at"].notna() & (frame["known_at"] < cutoff)]
+
+
+def _parse_feature_times(frame: Any, pandas: Any) -> None:
+    """Parse mixed ISO precision without silently discarding valid timestamps."""
+    frame["start_at"] = pandas.to_datetime(frame["start_at"], utc=True, format="mixed")
+    frame["known_at"] = pandas.to_datetime(
+        frame["known_at"], utc=True, format="mixed", errors="coerce"
+    )
+
+
 def train_catboost_baseline(
     features_csv: str | Path,
     output_dir: str | Path,
@@ -785,18 +969,21 @@ def train_catboost_baseline(
     train_before: str = "2025-01-01",
     test_from: str = "2026-01-01",
     iterations: int = 900,
+    feature_set: str = "core",
 ) -> dict[str, object]:
     import numpy as np
     import pandas as pd
     from catboost import CatBoostClassifier, CatBoostRegressor, Pool
 
     frame = pd.read_csv(features_csv, low_memory=False)
-    frame["start_at"] = pd.to_datetime(frame["start_at"], utc=True)
+    _parse_feature_times(frame, pd)
     train_cut = pd.Timestamp(train_before, tz="UTC")
     test_cut = pd.Timestamp(test_from, tz="UTC")
-    train = frame[frame.start_at < train_cut].copy()
-    validation = frame[
-        (frame.start_at >= train_cut) & (frame.start_at < test_cut)
+    train = _labels_known_before(frame, train_cut)
+    train = train[train.start_at < train_cut].copy()
+    validation = _labels_known_before(frame, test_cut)
+    validation = validation[
+        (validation.start_at >= train_cut) & (validation.start_at < test_cut)
     ].copy()
     test = frame[frame.start_at >= test_cut].copy()
     if min(len(train), len(validation), len(test)) == 0:
@@ -805,6 +992,7 @@ def train_catboost_baseline(
     excluded = {
         "match_id",
         "start_at",
+        "known_at",
         "team1_name",
         "team2_name",
         "team1_win",
@@ -816,7 +1004,7 @@ def train_catboost_baseline(
         "round_share_target",
         "sample_weight",
     }
-    feature_columns = [column for column in frame.columns if column not in excluded]
+    feature_columns = _select_feature_columns(frame, excluded, feature_set)
     categorical = [
         column
         for column in (
@@ -826,6 +1014,7 @@ def train_catboost_baseline(
             "game_version",
             "tournament_tier",
             "event_type",
+            "bracket_type",
         )
         if column in feature_columns
     ]
@@ -888,6 +1077,8 @@ def train_catboost_baseline(
             "validation_rows": len(validation),
             "test_rows": len(test),
             "train_rows_after_mirroring": len(augmented_train),
+            "feature_set": feature_set,
+            "feature_count": len(feature_columns),
         },
         "winner": {
             "overall": _binary_metrics(test.team1_win, probability),
@@ -1160,13 +1351,14 @@ def walk_forward_catboost_backtest(
     test_from: str = "2026-01-01",
     validation_days: int = 90,
     iterations: int = 900,
+    feature_set: str = "core",
 ) -> dict[str, object]:
     """Simulate a monthly production retrain without consuming future labels."""
     import pandas as pd
     from catboost import CatBoostClassifier, Pool
 
     frame = pd.read_csv(features_csv, low_memory=False)
-    frame["start_at"] = pd.to_datetime(frame["start_at"], utc=True)
+    _parse_feature_times(frame, pd)
     test_cut = pd.Timestamp(test_from, tz="UTC")
     if test_cut.day != 1:
         raise ValueError("test_from must be the first day of a month")
@@ -1176,6 +1368,7 @@ def walk_forward_catboost_backtest(
     excluded = {
         "match_id",
         "start_at",
+        "known_at",
         "team1_name",
         "team2_name",
         "team1_win",
@@ -1187,7 +1380,7 @@ def walk_forward_catboost_backtest(
         "round_share_target",
         "sample_weight",
     }
-    feature_columns = [column for column in frame.columns if column not in excluded]
+    feature_columns = _select_feature_columns(frame, excluded, feature_set)
     categorical = [
         column
         for column in (
@@ -1197,6 +1390,7 @@ def walk_forward_catboost_backtest(
             "game_version",
             "tournament_tier",
             "event_type",
+            "bracket_type",
         )
         if column in feature_columns
     ]
@@ -1228,10 +1422,12 @@ def walk_forward_catboost_backtest(
 
     for fold_number, fold_start in enumerate(fold_starts, start=1):
         fold_end = fold_start + pd.offsets.MonthBegin(1)
-        history = frame[frame.start_at < fold_start].copy()
+        history = _labels_known_before(frame, fold_start).copy()
         validation_start = fold_start - pd.Timedelta(days=validation_days)
-        tuning_train = history[history.start_at < validation_start].copy()
-        tuning_validation = history[history.start_at >= validation_start].copy()
+        tuning_train = _labels_known_before(history, validation_start).copy()
+        tuning_validation = history[
+            (history.start_at >= validation_start) & (history.start_at < fold_start)
+        ].copy()
         fold_test = frame[
             (frame.start_at >= fold_start) & (frame.start_at < fold_end)
         ].copy()
@@ -1324,6 +1520,8 @@ def walk_forward_catboost_backtest(
             "retrain": "monthly_full_refit",
             "validation_days": validation_days,
             "future_labels_used": False,
+            "feature_set": feature_set,
+            "feature_count": len(feature_columns),
         },
         "overall": overall,
         "confidence_slices": _confidence_slices(
