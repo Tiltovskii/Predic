@@ -434,6 +434,47 @@ def _parser() -> argparse.ArgumentParser:
     map_walk_forward_parser.add_argument("--test-from", default="2026-01-01")
     map_walk_forward_parser.add_argument("--validation-days", type=int, default=90)
     map_walk_forward_parser.add_argument("--iterations", type=int, default=900)
+    map_walk_forward_parser.add_argument("--cohort-metadata-jsonl")
+
+    argus_data_parser = subparsers.add_parser(
+        "build-light-argus-dataset",
+        help="Build causal per-player histories for target-aware map prediction",
+    )
+    argus_data_parser.add_argument("--state-db", required=True)
+    argus_data_parser.add_argument("--matches-csv", required=True)
+    argus_data_parser.add_argument("--map-features-csv", required=True)
+    argus_data_parser.add_argument("--output-dir", required=True)
+    argus_data_parser.add_argument("--raw-dir")
+    argus_data_parser.add_argument("--stream", default="bo3-history-2020-2026-v2")
+    argus_data_parser.add_argument("--max-history", type=int, default=32)
+
+    argus_train_parser = subparsers.add_parser(
+        "train-light-argus",
+        help="Train a small target-aware player-history Transformer",
+    )
+    argus_train_parser.add_argument("--dataset-dir", required=True)
+    argus_train_parser.add_argument("--output-dir", required=True)
+    argus_train_parser.add_argument("--train-before", default="2025-01-01")
+    argus_train_parser.add_argument("--test-from", default="2026-01-01")
+    argus_train_parser.add_argument("--epochs", type=int, default=12)
+    argus_train_parser.add_argument("--patience", type=int, default=3)
+    argus_train_parser.add_argument("--batch-size", type=int, default=256)
+    argus_train_parser.add_argument("--learning-rate", type=float, default=2e-4)
+    argus_train_parser.add_argument("--weight-decay", type=float, default=0.01)
+    argus_train_parser.add_argument("--d-model", type=int, default=128)
+    argus_train_parser.add_argument("--layers", type=int, default=3)
+    argus_train_parser.add_argument("--heads", type=int, default=4)
+    argus_train_parser.add_argument("--dropout", type=float, default=0.10)
+    argus_train_parser.add_argument("--no-player-identity", action="store_true")
+    argus_train_parser.add_argument("--no-team-identity", action="store_true")
+    argus_train_parser.add_argument("--device", default="auto")
+    argus_train_parser.add_argument("--seed", type=int, default=20260827)
+    argus_train_parser.add_argument("--no-refit", action="store_true")
+    argus_train_parser.add_argument("--monthly-refit", action="store_true")
+    argus_train_parser.add_argument("--max-train-rows", type=int)
+    argus_train_parser.add_argument("--max-validation-rows", type=int)
+    argus_train_parser.add_argument("--max-test-rows", type=int)
+    argus_train_parser.add_argument("--catboost-predictions-csv")
     return parser
 
 
@@ -730,6 +771,51 @@ def main() -> None:
             test_from=args.test_from,
             validation_days=args.validation_days,
             iterations=args.iterations,
+            cohort_metadata_jsonl=args.cohort_metadata_jsonl,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    if args.command == "build-light-argus-dataset":
+        from .light_argus_data import build_light_argus_dataset
+
+        result = build_light_argus_dataset(
+            args.state_db,
+            args.matches_csv,
+            args.map_features_csv,
+            args.output_dir,
+            raw_dir=args.raw_dir,
+            stream=args.stream,
+            max_history=args.max_history,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    if args.command == "train-light-argus":
+        from .light_argus import train_light_argus
+
+        result = train_light_argus(
+            args.dataset_dir,
+            args.output_dir,
+            train_before=args.train_before,
+            test_from=args.test_from,
+            epochs=args.epochs,
+            patience=args.patience,
+            batch_size=args.batch_size,
+            learning_rate=args.learning_rate,
+            weight_decay=args.weight_decay,
+            d_model=args.d_model,
+            layers=args.layers,
+            heads=args.heads,
+            dropout=args.dropout,
+            use_player_identity=not args.no_player_identity,
+            use_team_identity=not args.no_team_identity,
+            device=args.device,
+            seed=args.seed,
+            refit=not args.no_refit,
+            monthly_refit=args.monthly_refit,
+            max_train_rows=args.max_train_rows,
+            max_validation_rows=args.max_validation_rows,
+            max_test_rows=args.max_test_rows,
+            catboost_predictions_csv=args.catboost_predictions_csv,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return

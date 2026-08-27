@@ -1,0 +1,121 @@
+{
+  "status": "retrospective_assumed_after_veto",
+  "data": {
+    "quality_gated_player_map_events": 1007022,
+    "map_targets": 59641,
+    "players": 9397,
+    "teams": 4128,
+    "maps": 12,
+    "train_before_2025": 32566,
+    "validation_2025": 14425,
+    "test_2026": 12650,
+    "test_matches": 5553,
+    "excluded_incomplete_roster_targets": 23811,
+    "dataset_size_mb": 241,
+    "mean_history_maps_per_test_player": 30.4463557312,
+    "full_history_rate": 0.9178339921,
+    "empty_history_rate": 0.0082687747
+  },
+  "protocol": {
+    "target": "winner of one named played map",
+    "prediction_point": "complete veto and confirmed five-player lineups before series start",
+    "history_cutoff": "event known_at <= target start_at",
+    "history_order": "known_at, match_id, game_id",
+    "same_series_maps_share_history": true,
+    "candidate_contains_outcome": false,
+    "retrain": "monthly full refit from scratch",
+    "epoch_selection": "2025 validation",
+    "selected_epochs": 2,
+    "test_from": "2026-01-01",
+    "future_labels_used": false,
+    "within_series_results_used": false,
+    "match_cluster_bootstrap_replicates": 3000,
+    "bootstrap_seed": 20260827
+  },
+  "model": {
+    "name": "Light target-aware player-history Argus",
+    "history_maps_per_player": 32,
+    "players_per_target": 10,
+    "transformer_layers": 3,
+    "width": 128,
+    "attention_heads": 4,
+    "dropout": 0.1,
+    "total_parameters": 2528897,
+    "optimizer": "AdamW",
+    "learning_rate": 0.0002,
+    "weight_decay": 0.01,
+    "precision": "BF16",
+    "device": "A100 80GB",
+    "side_symmetry_max_abs_logit_error": 0.0
+  },
+  "results": {
+    "light_argus_fixed_before_2026": {
+      "accuracy": 0.6249011858,
+      "roc_auc": 0.6793002510,
+      "logloss": 0.6348140251,
+      "brier": 0.2228338888,
+      "ece_10bin": 0.0197394257
+    },
+    "light_argus_monthly": {
+      "accuracy": 0.6293280632,
+      "roc_auc": 0.6756396924,
+      "logloss": 0.6367719892,
+      "brier": 0.2238107913,
+      "ece_10bin": 0.0217663815,
+      "accuracy_95_interval": [0.6201868883, 0.6380326506]
+    },
+    "light_argus_monthly_no_player_identity_same_seed": {
+      "accuracy": 0.6294861660,
+      "roc_auc": 0.6759000176,
+      "logloss": 0.6366510112,
+      "brier": 0.2237481355,
+      "ece_10bin": 0.0216956001,
+      "trainable_parameters": 1325953,
+      "accuracy_delta_vs_identity": 0.0001581028,
+      "accuracy_delta_95_interval": [-0.0033219509, 0.0035400051],
+      "logloss_delta_vs_identity": -0.0001209779,
+      "logloss_delta_95_interval": [-0.0009786183, 0.0007047356]
+    },
+    "map_catboost_same_target_cohort": {
+      "accuracy": 0.6403162055,
+      "roc_auc": 0.6913853095,
+      "logloss": 0.6278461928,
+      "brier": 0.2195634075,
+      "ece_10bin": 0.0112939250
+    },
+    "series_team_elo": {
+      "accuracy": 0.6131225296,
+      "roc_auc": 0.6519834270,
+      "logloss": 0.6564300430,
+      "brier": 0.2317970085,
+      "ece_10bin": 0.0355220042
+    }
+  },
+  "paired_monthly_argus_vs_catboost": {
+    "accuracy_delta": -0.0109881423,
+    "accuracy_delta_95_interval": [-0.0173270847, -0.0045008677],
+    "logloss_delta": 0.0089257964,
+    "logloss_delta_95_interval": [0.0059015858, 0.0119793437],
+    "probability_correlation": 0.8999837563,
+    "argus_only_correct": 808,
+    "catboost_only_correct": 947
+  },
+  "light_argus_slices": {
+    "bo1": {"rows": 494, "accuracy": 0.7186234818, "logloss": 0.5635501422},
+    "bo3_all_maps": {"rows": 12156, "accuracy": 0.6256992432, "logloss": 0.6397476056},
+    "bo3_map1": {"rows": 5059, "accuracy": 0.6228503657},
+    "bo3_map2": {"rows": 5059, "accuracy": 0.6519074916},
+    "bo3_decider": {"rows": 2038, "accuracy": 0.5677134446},
+    "lan": {"rows": 4253, "accuracy": 0.6543616271},
+    "online": {"rows": 8397, "accuracy": 0.6166488031},
+    "tier_s_a": {"rows": 1668, "accuracy": 0.6217026379}
+  },
+  "limitations": [
+    "The neural result is a single-seed baseline; seed variance has not been estimated.",
+    "Historical vetoes lack first-seen timestamps, so this is not a proven live five-minute backtest.",
+    "Only targets with two captured five-player rosters are included.",
+    "Odds and market timestamps are absent; predictive accuracy is not evidence of betting profitability.",
+    "The 2026 slice has informed model development and must not remain the next lockbox."
+  ],
+  "conclusion": "Light Argus beats causal Elo but trails same-cohort CatBoost. The next experiment should pretrain transferable player histories and feed strictly out-of-fold embeddings into the tree baseline."
+}

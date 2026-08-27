@@ -609,6 +609,26 @@ def _slice_metrics(predictions: Any) -> dict[str, object]:
     return slices
 
 
+def _cohort_map_row_ids(metadata_jsonl: str | Path) -> set[str]:
+    path = Path(metadata_jsonl).resolve()
+    result: set[str] = set()
+    with path.open(encoding="utf-8") as source:
+        for line_number, line in enumerate(source, start=1):
+            try:
+                row = json.loads(line)
+                map_row_id = str(row["map_row_id"])
+            except (json.JSONDecodeError, KeyError, TypeError) as error:
+                raise ValueError(
+                    f"invalid cohort metadata at {path}:{line_number}"
+                ) from error
+            if map_row_id in result:
+                raise ValueError(f"duplicate cohort map_row_id: {map_row_id}")
+            result.add(map_row_id)
+    if not result:
+        raise ValueError("cohort metadata is empty")
+    return result
+
+
 def walk_forward_map_catboost_backtest(
     features_csv: str | Path,
     output_dir: str | Path,
@@ -616,6 +636,7 @@ def walk_forward_map_catboost_backtest(
     test_from: str = "2026-01-01",
     validation_days: int = 90,
     iterations: int = 900,
+    cohort_metadata_jsonl: str | Path | None = None,
 ) -> dict[str, object]:
     """Monthly point-in-time CatBoost backtest for individual map winners."""
     import numpy as np
@@ -623,6 +644,18 @@ def walk_forward_map_catboost_backtest(
     from catboost import CatBoostClassifier, Pool
 
     frame = pd.read_csv(features_csv, low_memory=False)
+    cohort_rows: int | None = None
+    if cohort_metadata_jsonl is not None:
+        if frame.map_row_id.astype(str).duplicated().any():
+            raise ValueError("map feature table has duplicate map_row_id values")
+        cohort_ids = _cohort_map_row_ids(cohort_metadata_jsonl)
+        available = set(frame.map_row_id.astype(str))
+        missing = cohort_ids - available
+        if missing:
+            sample = ", ".join(sorted(missing)[:5])
+            raise ValueError(f"cohort map_row_id values are missing: {sample}")
+        frame = frame[frame.map_row_id.astype(str).isin(cohort_ids)].copy()
+        cohort_rows = len(frame)
     _parse_feature_times(frame, pd)
     test_cut = pd.Timestamp(test_from, tz="UTC")
     if test_cut.day != 1:
@@ -781,6 +814,8 @@ def walk_forward_map_catboost_backtest(
             "future_labels_used": False,
             "prediction_point": "retrospective_assumed_after_veto",
             "feature_count": len(feature_columns),
+            "cohort_filter": cohort_metadata_jsonl is not None,
+            "cohort_rows": cohort_rows,
         },
         "overall": overall,
         "confidence_slices": _confidence_slices(

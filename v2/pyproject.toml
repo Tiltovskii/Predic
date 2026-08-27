@@ -14,6 +14,11 @@ baseline = [
   "catboost>=1.2,<2",
   "pandas>=2.2,<4",
 ]
+argus = [
+  "numpy>=1.26,<3",
+  "pandas>=2.2,<4",
+  "torch>=2.4,<3",
+]
 
 [project.scripts]
 predic-data = "predic_v2.cli:main"

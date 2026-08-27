@@ -10,6 +10,7 @@ from pathlib import Path
 from predic_v2.baseline import _mirror
 from predic_v2.map_baseline import (
     _CausalMapStore,
+    _cohort_map_row_ids,
     _eligible_target_rows,
     _map_categorical_columns,
     _PlayedMap,
@@ -98,6 +99,21 @@ def _series(match: dict[str, str]) -> dict[str, object]:
 
 
 class MapBaselineTest(unittest.TestCase):
+    def test_cohort_metadata_requires_unique_map_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "targets.jsonl"
+            path.write_text(
+                '{"map_row_id":"1:1"}\n{"map_row_id":"2:1"}\n',
+                encoding="utf-8",
+            )
+            self.assertEqual({"1:1", "2:1"}, _cohort_map_row_ids(path))
+            path.write_text(
+                '{"map_row_id":"1:1"}\n{"map_row_id":"1:1"}\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "duplicate cohort"):
+                _cohort_map_row_ids(path)
+
     def test_target_rows_use_veto_identity_and_pick_owner(self) -> None:
         match = _match(1, datetime(2025, 1, 1, tzinfo=UTC))
 

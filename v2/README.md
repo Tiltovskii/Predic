@@ -1,8 +1,8 @@
 # Predic v2 data layer
 
-The causal CatBoost series and individual-map winner baselines, enriched
-counter sets, monthly walk-forward metrics, and the separate assumed after-veto
-experiments are documented with reproduction commands in
+The causal CatBoost series and individual-map winner baselines, the Light
+Argus player-history Transformer, enriched counter sets, monthly walk-forward
+metrics, and the separate assumed after-veto experiments are documented in
 [BASELINE.md](BASELINE.md).
 
 This directory contains the point-in-time data foundation for a CS/CS2 match
@@ -35,6 +35,10 @@ predic-data import-legacy \
   --from-date 2018-01-01
 predic-data audit --db data/predic.sqlite3
 ```
+
+Install `.[baseline]` for CatBoost experiments or `.[argus]` for the optional
+PyTorch sequence model. The base ingestion CLI does not import either heavy
+dependency unless its corresponding command is invoked.
 
 The legacy importer deduplicates the mirrored team-order augmentation in the
 old CSV and marks all reconstructed identities as low-confidence. It is useful

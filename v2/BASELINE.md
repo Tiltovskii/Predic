@@ -227,6 +227,78 @@ predictive confidence slices, not betting returns: odds, their timestamps,
 selection rules, and a prospective lockbox are still absent. The same
 historical `veto_known_at` limitation from the preceding section applies.
 
+## Light target-aware player-history Transformer
+
+The first sequence model is deliberately small. It is an early-binding,
+target-aware encoder inspired by Argus rather than a copy of its production
+implementation. One target is a named map after veto. For each of the ten
+known participants, the candidate map token is appended to at most 32 past
+player-map events and participates inside a shared Transformer encoder. The
+candidate contains map, organization, veto role, tournament context, and
+causal pre-series counters, but never its winner, score, or round share.
+
+Past events contain the player's per-round kills, deaths, assists, damage,
+ADR, KAST, rating, openings, trades, accuracy/economy proxies, past outcome,
+organization, opponent, map, tier, venue, version, and age. Events are ordered
+by `(known_at, match_id, game_id)` and admitted only when `known_at <=` the
+target series start. All maps in one series share exactly the same pre-series
+histories. The two side scores share weights and are subtracted, so swapping
+the complete sides negates the logit exactly.
+
+The compact dataset stores 1,007,022 quality-gated player-map events once and
+59,641 map targets as history indices. It occupies 241 MB. There are 32,566
+tuning-train targets before 2025, 14,425 validation targets in 2025, and 12,650
+test maps in 2026. Another 23,811 map rows are excluded because at least one
+side has no complete five-player roster in the captured player archive; they
+are not filled or assigned invented participants. On the 2026 cohort, a player
+has 30.45 of 32 history slots on average and 91.78% of player sequences are
+full.
+
+The main model has 3 Transformer layers, width 128, 4 heads, 2.53M parameters,
+BF16 on one A100, AdamW with peak learning rate `2e-4`, gradient clipping, and
+one weighted BCE head. Epoch count is selected on 2025; the selected two epochs
+are then refit from scratch at each 2026 month boundary using only labels known
+before that month.
+
+| Exact player-complete 2026 cohort | Accuracy | ROC AUC | Log loss | Brier | ECE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Series team Elo | 61.31% | 0.6520 | 0.6564 | 0.2318 | 0.0355 |
+| Light Argus, one refit before 2026 | 62.49% | 0.6793 | 0.6348 | 0.2228 | 0.0197 |
+| Light Argus, monthly full refit | 62.93% | 0.6756 | 0.6368 | 0.2238 | 0.0218 |
+| Light Argus, monthly, no player ID | 62.95% | 0.6759 | 0.6367 | 0.2237 | 0.0217 |
+| Map CatBoost, same target cohort | **64.03%** | **0.6914** | **0.6278** | **0.2196** | **0.0113** |
+
+The sequence model is a useful first baseline, but it does **not** beat
+CatBoost. Clustered over 5,553 matches, monthly Light Argus trails same-cohort
+CatBoost by 1.10 percentage points of accuracy (95% interval -1.73 to -0.45)
+and has 0.00893 higher log loss (95% interval +0.00590 to +0.01198). Its own
+accuracy interval is 62.02% to 63.80%. This is not a seed-level significance
+claim—the neural model still needs repeated-seed evaluation—but the current
+single run is clearly not a replacement for the tree model.
+
+Removing the learned player-ID embedding changes only two net correct calls:
+accuracy rises by 0.016 percentage point and log loss falls by 0.00012. A
+same-seed match-cluster bootstrap gives intervals of -0.33 to +0.35 percentage
+point and -0.00098 to +0.00070 respectively. This is indistinguishable from
+noise, so the ID-enabled architecture remains the named baseline rather than
+selecting an ablation on the reused test. It does suggest that future gains
+must come from learning transferable form and role representations, not from
+memorizing player identity.
+
+Light Argus reaches 71.86% on 494 BO1 maps, 65.19% on BO3 Map 2, and only
+56.77% on 2,038 BO3 deciders. It is stronger on LAN (65.44%) than online
+(61.66%). CatBoost and Argus probabilities are highly correlated, but each has
+exclusive correct calls (808 Argus-only versus 947 CatBoost-only). A blend
+weight searched on this reused test would be leakage; stacking must be trained
+from out-of-fold Transformer embeddings on a separate validation period.
+
+The next justified experiment is therefore not simply a larger Transformer.
+Pretrain the player encoder on the complete million-event stream, export
+strictly out-of-fold player/team embeddings, and let the proven CatBoost head
+consume them alongside its counters. Partial-roster masking can then recover
+training coverage without inventing players. Odds and a prospective veto
+lockbox remain separate requirements before any betting conclusion.
+
 ## Reproduce
 
 ```bash
@@ -287,6 +359,39 @@ v2/.venv/bin/predic-data build-map-baseline-features \
 v2/.venv/bin/predic-data backtest-map-catboost-walk-forward \
   --features-csv v2/data/baseline/maps-core-veto.csv \
   --output-dir v2/data/baseline/walk-map-core-veto \
+  --test-from 2026-01-01 \
+  --validation-days 90
+
+v2/.venv/bin/python -m pip install --no-user -e 'v2[argus]'
+
+v2/.venv/bin/predic-data build-light-argus-dataset \
+  --state-db v2/data/bo3-history-v2-state.sqlite3 \
+  --matches-csv v2/data/baseline/matches.csv \
+  --map-features-csv v2/data/baseline/maps-core-veto.csv \
+  --output-dir v2/data/light-argus-v1 \
+  --max-history 32
+
+v2/.venv/bin/predic-data train-light-argus \
+  --dataset-dir v2/data/light-argus-v1 \
+  --output-dir v2/data/light-argus-v1/output-monthly \
+  --train-before 2025-01-01 \
+  --test-from 2026-01-01 \
+  --epochs 12 \
+  --patience 3 \
+  --batch-size 256 \
+  --d-model 128 \
+  --layers 3 \
+  --heads 4 \
+  --learning-rate 0.0002 \
+  --monthly-refit \
+  --catboost-predictions-csv \
+    v2/data/baseline/walk-map-core-veto/map_walk_forward_test_predictions.csv
+
+# Retrain the CatBoost comparator on exactly the Argus-eligible target cohort.
+v2/.venv/bin/predic-data backtest-map-catboost-walk-forward \
+  --features-csv v2/data/baseline/maps-core-veto.csv \
+  --cohort-metadata-jsonl v2/data/light-argus-v1/target_metadata.jsonl \
+  --output-dir v2/data/light-argus-v1/catboost-player-complete \
   --test-from 2026-01-01 \
   --validation-days 90
 ```
