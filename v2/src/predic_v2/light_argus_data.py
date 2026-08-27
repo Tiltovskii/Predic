@@ -14,6 +14,7 @@ from .counters import canonical_map_name
 
 FORMAT_VERSION = "predic-light-argus-v2"
 DEFAULT_STREAM = "bo3-history-2020-2026-v2"
+DEFAULT_MAX_HISTORY = 256
 
 EVENT_NUMERIC_FIELDS = (
     "kills_per_round",
@@ -305,7 +306,7 @@ def build_light_argus_dataset(
     *,
     raw_dir: str | Path | None = None,
     stream: str = DEFAULT_STREAM,
-    max_history: int = 64,
+    max_history: int = DEFAULT_MAX_HISTORY,
 ) -> dict[str, object]:
     """Build a compact causal player-history dataset for map prediction."""
     import numpy as np

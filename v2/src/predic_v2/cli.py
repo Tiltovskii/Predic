@@ -37,6 +37,7 @@ from .hltv_discovery import (
 )
 from .hltv_offline import parse_file, records_to_jsonl
 from .legacy import import_legacy_csv
+from .light_argus_data import DEFAULT_MAX_HISTORY
 from .map_baseline import (
     build_map_feature_table,
     walk_forward_map_catboost_backtest,
@@ -458,7 +459,9 @@ def _parser() -> argparse.ArgumentParser:
     argus_data_parser.add_argument("--output-dir", required=True)
     argus_data_parser.add_argument("--raw-dir")
     argus_data_parser.add_argument("--stream", default="bo3-history-2020-2026-v2")
-    argus_data_parser.add_argument("--max-history", type=int, default=64)
+    argus_data_parser.add_argument(
+        "--max-history", type=int, default=DEFAULT_MAX_HISTORY
+    )
 
     argus_train_parser = subparsers.add_parser(
         "train-light-argus",

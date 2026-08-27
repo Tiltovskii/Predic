@@ -1,7 +1,7 @@
 # Predic v2 data layer
 
 The causal CatBoost series and individual-map winner baselines, the Light
-Argus player-history Transformer, its 64-event pretrained out-of-time embedding
+Argus player-history Transformer, its 256-event pretrained out-of-time embedding
 hybrid, enriched counter sets, monthly walk-forward metrics, and the separate
 assumed after-veto experiments are documented in [BASELINE.md](BASELINE.md).
 

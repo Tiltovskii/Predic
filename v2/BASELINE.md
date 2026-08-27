@@ -358,32 +358,47 @@ probability of improvement. This is encouraging replication, not a lockbox or
 a claim of practical betting edge: the absolute lift is small, odds are still
 absent, and architecture/feature selection already used the available years.
 
-### Player history length: 32 -> 64
+### Player history length: 32 -> 64 -> 256
 
-The next controlled ablation changes only `max_history`. With 64 events, a
-target player has 56.60 prior maps on average instead of 29.67; the median is
-64 and 80.75% of target-player sequences are full. Both versions contain the
-same 1,006,392 events and 59,641 targets. The h64 audit again finds zero future
-events and zero current-match events. Model width, layers, auxiliary tasks,
-yearly OOF folds, seed, optimizer, and CatBoost protocol are unchanged. The
-extra positional embeddings add only 2,048 parameters.
+The controlled ablations change only `max_history`. At h32, h64, and h256 a
+target player has respectively 29.67, 56.60, and 181.58 prior maps on average.
+The h256 median is 256 and 52.11% of target-player sequences are full. All
+versions contain the same 1,006,392 events and 59,641 targets. The h256 audit
+again finds zero future events and zero current-match events. Model width,
+layers, auxiliary tasks, yearly OOF folds, seed, optimizer, and CatBoost
+protocol are unchanged. H256 has 1,055,508 total parameters, only 12,288 more
+than h64 because the difference is positional embeddings.
 
 | Cohort and model | Accuracy | ROC AUC | Log loss | Brier | ECE |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | 2026 counters + h32 auxiliary | 63.99% | 0.69269 | 0.62690 | 0.21914 | **0.01077** |
-| 2026 counters + h64 auxiliary | **64.13%** | **0.69315** | **0.62647** | **0.21898** | 0.01295 |
+| 2026 counters + h64 auxiliary | 64.13% | 0.69315 | 0.62647 | 0.21898 | 0.01295 |
+| 2026 counters + h256 auxiliary | **64.17%** | **0.69379** | **0.62582** | **0.21876** | 0.01191 |
 | 2025 counters + h32 auxiliary | 63.26% | **0.68397** | **0.63426** | **0.22224** | 0.00815 |
-| 2025 counters + h64 auxiliary | **63.39%** | 0.68334 | 0.63451 | 0.22236 | **0.00732** |
+| 2025 counters + h64 auxiliary | 63.39% | 0.68334 | 0.63451 | 0.22236 | 0.00732 |
+| 2025 counters + h256 auxiliary | **63.48%** | 0.68354 | 0.63446 | 0.22232 | **0.00732** |
 
-H64 adds 17 net correct maps in 2026 and 19 in 2025. Against h32, however, the
-match-cluster intervals include zero in both years. On the combined 27,075-map
-cohort, accuracy rises by 0.133 percentage point (95% interval -0.081 to
-+0.347), while log loss changes by only -0.000065 (-0.000507 to +0.000385) and
-Brier by -0.000009 (-0.000216 to +0.000197). H64 is therefore the new research
-default because its accuracy direction repeats and it improves the latest-year
-probabilities, but it is not a proven replacement for h32. The next history
-experiment should compare recency-biased 64/128 retrieval on a new lockbox,
-rather than selecting again on these two reused years.
+H256 improves the neural auxiliary task itself in both years: its map-win AUC
+is 0.5699/0.5822 in 2025/2026, versus 0.5637/0.5736 for h64, and its normalised
+RMSE is 1.8320/1.5292, versus 1.8387/1.5349. The downstream CatBoost lift is
+much smaller. Against h64, h256 adds 19 net correct maps across the combined
+27,075-map cohort: accuracy changes by +0.070 percentage point (match-cluster
+95% interval -0.177 to +0.328), log loss by -0.000330 (-0.000941 to +0.000291),
+and Brier by -0.000123 (-0.000399 to +0.000155). Every point estimate improves
+in both years, but none of these h256-versus-h64 intervals excludes zero.
+
+Against the pure counter model, h256 improves combined log loss by 0.00113
+(95% interval 0.00045 to 0.00181 better) and Brier by 0.00046 (0.00015 to
+0.00077 better), while the accuracy interval still includes zero. This makes
+h256 the research default, not a proven replacement: both 2025 and 2026 were
+already used during development and must not be called a fresh lockbox.
+
+Dense h1024 is not the next experiment. Only 3.10% of target-player sequences
+actually reach 1,024 events and the uncapped mean is 348.65. Its history-index
+matrix alone would occupy about 6.11 GiB, and a dense attention-score matrix is
+about 15.9 times larger than at h256 (248.7 times h64). The next long-history
+ablation should keep a recent window and retrieve or chunk selected older maps,
+then evaluate on a new untouched time period.
 
 ## Reproduce
 
@@ -455,7 +470,7 @@ v2/.venv/bin/predic-data build-light-argus-dataset \
   --matches-csv v2/data/baseline/matches.csv \
   --map-features-csv v2/data/baseline/maps-core-veto.csv \
   --output-dir v2/data/light-argus-v2 \
-  --max-history 64
+  --max-history 256
 
 v2/.venv/bin/predic-data train-light-argus \
   --dataset-dir v2/data/light-argus-v2 \

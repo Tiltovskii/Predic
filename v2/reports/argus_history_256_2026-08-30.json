@@ -1,0 +1,188 @@
+{
+  "status": "retrospective_assumed_after_veto",
+  "experiment": "player history length 32 versus 64 versus 256, with a dense-1024 feasibility audit",
+  "controlled_variables": [
+    "source events and target cohort",
+    "yearly out-of-time folds",
+    "normalisation period",
+    "model width, layers and heads",
+    "auxiliary tasks and tier weights",
+    "optimizer, epochs and seed",
+    "CatBoost features, seed and monthly cutoffs"
+  ],
+  "data": {
+    "events": 1006392,
+    "targets": 59641,
+    "players": 9397,
+    "teams": 4128,
+    "target_player_uncapped_history": {
+      "mean": 353.451,
+      "p25": 94,
+      "p50": 274,
+      "p75": 552,
+      "p90": 805,
+      "p95": 941,
+      "p99": 1217,
+      "max": 1728
+    },
+    "target_player_capped_history": {
+      "32": {"mean": 29.672, "full_rate": 0.8803},
+      "64": {"mean": 56.596, "full_rate": 0.8075},
+      "128": {"mean": 104.429, "full_rate": 0.6941},
+      "256": {"mean": 181.582, "full_rate": 0.5211},
+      "512": {"mean": 281.841, "full_rate": 0.2803},
+      "1024": {"mean": 348.648, "full_rate": 0.0310}
+    },
+    "history_256_audit": {
+      "mean_event_history": 164.787,
+      "median_event_history": 208,
+      "empty_event_history_rate": 0.01666,
+      "full_event_history_rate": 0.44238,
+      "mean_target_player_history": 181.582,
+      "median_target_player_history": 256,
+      "empty_target_player_history_rate": 0.01355,
+      "full_target_player_history_rate": 0.52111,
+      "future_events": 0,
+      "current_match_events": 0
+    }
+  },
+  "dense_feasibility": {
+    "history_index_matrix_gib": {
+      "64": 0.382,
+      "128": 0.764,
+      "256": 1.529,
+      "512": 3.057,
+      "1024": 6.114
+    },
+    "attention_score_matrix_relative_to_h64": {
+      "128": 3.94,
+      "256": 15.63,
+      "512": 62.29,
+      "1024": 248.67
+    },
+    "note": "These are dense attention-matrix scaling ratios, not end-to-end wall-time forecasts. H1024 is about 15.9x h256 by this component."
+  },
+  "model": {
+    "history_256_total_parameters": 1055508,
+    "history_256_trainable_parameters": 454036,
+    "history_256_training_device": "A100 80GB",
+    "history_256_observed_training_gpu_memory_mib": 1850,
+    "history_256_observed_export_gpu_memory_mib_approx": 6557,
+    "history_256_wall_time_minutes_approx": 17.5,
+    "yearly_folds": [2021, 2022, 2023, 2024, 2025, 2026],
+    "epochs_per_fold": 2,
+    "final_refit_epochs": 2,
+    "d_model": 64,
+    "layers": 2,
+    "heads": 4,
+    "batch_size": 512,
+    "seed": 20260828,
+    "oof_rows": 58949
+  },
+  "auxiliary_event_evaluation": {
+    "2025": {
+      "history_32": {"normalised_rmse": 1.839732050895691, "map_win_auc": 0.5630758254253891, "map_win_logloss": 0.6869424929021521},
+      "history_64": {"normalised_rmse": 1.8387364149093628, "map_win_auc": 0.5637383516603744, "map_win_logloss": 0.6871552343936581},
+      "history_256": {"normalised_rmse": 1.8320186138, "map_win_auc": 0.5698551254, "map_win_logloss": 0.68538933765, "map_win_ece_10bin": 0.00883585}
+    },
+    "2026": {
+      "history_32": {"normalised_rmse": 1.5330464839935303, "map_win_auc": 0.5716633859059704, "map_win_logloss": 0.6844223449777754},
+      "history_64": {"normalised_rmse": 1.5348585844039917, "map_win_auc": 0.5735867533304678, "map_win_logloss": 0.6840469508265169},
+      "history_256": {"normalised_rmse": 1.5291894674, "map_win_auc": 0.58216928925, "map_win_logloss": 0.68273443387, "map_win_ece_10bin": 0.01596653}
+    }
+  },
+  "catboost_hybrid": {
+    "2025": {
+      "rows": 14425,
+      "matches": 6488,
+      "counters": {"accuracy": 0.63438474870, "roc_auc": 0.68323246807, "logloss": 0.63480813855, "brier": 0.22248251212, "ece_10bin": 0.00957458657},
+      "history_32": {"accuracy": 0.6325823223570191, "roc_auc": 0.6839749055548652, "logloss": 0.6342551694859158, "brier": 0.22223962449659235, "ece_10bin": 0.00814989383392836},
+      "history_64": {"accuracy": 0.6338994800693241, "roc_auc": 0.683341011673646, "logloss": 0.6345080120836769, "brier": 0.22236197244587488, "ece_10bin": 0.007318591099963853},
+      "history_256": {"accuracy": 0.6348006932409012, "roc_auc": 0.6835447584378131, "logloss": 0.6344581952421356, "brier": 0.22231993583065396, "ece_10bin": 0.007316657628623595},
+      "history_256_minus_64": {
+        "accuracy": 0.0009012,
+        "accuracy_95_interval": [-0.0025002, 0.0044551],
+        "logloss": -0.00004982,
+        "logloss_95_interval": [-0.00087695, 0.00080132],
+        "brier": -0.00004204,
+        "brier_95_interval": [-0.00042721, 0.00034302]
+      }
+    },
+    "2026": {
+      "rows": 12650,
+      "matches": 5553,
+      "counters": {"accuracy": 0.6403162055, "roc_auc": 0.6913853095, "logloss": 0.6278461928, "brier": 0.2195634075, "ece_10bin": 0.011293925},
+      "history_32": {"accuracy": 0.6399209486166009, "roc_auc": 0.6926851820809207, "logloss": 0.6268977411452357, "brier": 0.21913827542338649, "ece_10bin": 0.010770093255236805},
+      "history_64": {"accuracy": 0.6412648221343874, "roc_auc": 0.6931480132002351, "logloss": 0.6264705636623655, "brier": 0.2189790860190009, "ece_10bin": 0.012946337695277114},
+      "history_256": {"accuracy": 0.6417391304347826, "roc_auc": 0.6937905328824142, "logloss": 0.6258209598235636, "brier": 0.21876306111589672, "ece_10bin": 0.011909650184954497},
+      "history_256_minus_64": {
+        "accuracy": 0.0004743,
+        "accuracy_95_interval": [-0.0033345, 0.0043380],
+        "logloss": -0.00064960,
+        "logloss_95_interval": [-0.00154452, 0.00025761],
+        "brier": -0.00021602,
+        "brier_95_interval": [-0.00063451, 0.00016997]
+      }
+    },
+    "combined_2025_2026": {
+      "rows": 27075,
+      "matches": 12041,
+      "history_256_minus_64": {
+        "net_additional_correct_maps": 19,
+        "accuracy": 0.00070175,
+        "accuracy_95_interval": [-0.0017731, 0.0032753],
+        "logloss": -0.00033005,
+        "logloss_95_interval": [-0.00094070, 0.00029139],
+        "brier": -0.00012333,
+        "brier_95_interval": [-0.00039932, 0.00015487]
+      },
+      "history_256_minus_32": {
+        "net_additional_correct_maps": 55,
+        "accuracy": 0.00203139,
+        "accuracy_95_interval": [-0.00062856, 0.00467051],
+        "logloss": -0.00039493,
+        "logloss_95_interval": [-0.00102978, 0.00025934],
+        "brier": -0.00013252,
+        "brier_95_interval": [-0.00043138, 0.00015557]
+      },
+      "history_256_minus_counters": {
+        "accuracy": 0.00088643,
+        "accuracy_95_interval": [-0.0018414, 0.0035227],
+        "logloss": -0.00113267,
+        "logloss_95_interval": [-0.00181312, -0.00045106],
+        "brier": -0.00046056,
+        "brier_95_interval": [-0.00076552, -0.00015130]
+      }
+    }
+  },
+  "history_length_strata_history_256_minus_64": {
+    "2025": [
+      {"mean_history_bin": "<=64", "rows": 522, "accuracy_pp": 1.724, "logloss": -0.001214, "brier": -0.000648},
+      {"mean_history_bin": "64-128", "rows": 1261, "accuracy_pp": 0.159, "logloss": -0.000382, "brier": -0.000093},
+      {"mean_history_bin": "128-192", "rows": 2816, "accuracy_pp": 0.249, "logloss": 0.000612, "brier": 0.000232},
+      {"mean_history_bin": "192-240", "rows": 3903, "accuracy_pp": -0.128, "logloss": 0.000467, "brier": 0.000185},
+      {"mean_history_bin": "240-256", "rows": 5923, "accuracy_pp": 0.000, "logloss": -0.000532, "brier": -0.000258}
+    ],
+    "2026": [
+      {"mean_history_bin": "<=64", "rows": 432, "accuracy_pp": 0.694, "logloss": -0.005124, "brier": -0.002290},
+      {"mean_history_bin": "64-128", "rows": 1336, "accuracy_pp": -0.898, "logloss": -0.003065, "brier": -0.001010},
+      {"mean_history_bin": "128-192", "rows": 2786, "accuracy_pp": 0.072, "logloss": -0.000373, "brier": -0.000003},
+      {"mean_history_bin": "192-240", "rows": 3357, "accuracy_pp": 0.238, "logloss": -0.000110, "brier": -0.000066},
+      {"mean_history_bin": "240-256", "rows": 4739, "accuracy_pp": 0.106, "logloss": -0.000105, "brier": -0.000035}
+    ]
+  },
+  "paired_bootstrap": {
+    "cluster": "match_id within year",
+    "replicates": 5000,
+    "seed": 20260830
+  },
+  "decision": "Use 256 as the research default and retain 32/64 as controls. H256 improves every h64 downstream point estimate in both reused years and improves the direct auxiliary task more clearly, but its paired h64 confidence intervals include zero. Do not train dense h1024 next; test recent-plus-retrieved or chunked history on a fresh time lockbox.",
+  "limitations": [
+    "Both 2025 and 2026 were available during model development and neither is a fresh lockbox.",
+    "The h256 versus h64 confidence intervals include zero for every paired downstream metric.",
+    "The history-length strata are descriptive post-hoc slices and are not independent experiments.",
+    "Attention weights are not causal feature importance; older-history value requires controlled ablation or retraining.",
+    "Historical veto timestamps and market odds are still absent.",
+    "Dense attention scaling is theoretical component-level scaling, not measured end-to-end h1024 runtime."
+  ]
+}
