@@ -1,7 +1,8 @@
 # Predic v2 data layer
 
 The causal CatBoost winner/series-score/round-share baselines, enriched counter
-sets, monthly walk-forward metrics, and reproduction commands are documented in
+sets, monthly walk-forward metrics, and the separate assumed after-veto
+experiment are documented with reproduction commands in
 [BASELINE.md](BASELINE.md).
 
 This directory contains the point-in-time data foundation for a CS/CS2 match
@@ -264,6 +265,12 @@ NULL`; a genuinely observed pre-match snapshot may use its capture time as
 `known_at`. Never treat a historical BO3 `updated_at`, current team rank, AI
 prediction, late map disclosure, or bookmaker value as information known before
 the match.
+
+For a deployable after-veto model, persist the first snapshot with a complete
+pick/ban sequence as `veto_known_at`. The post-hoc historical `match_maps`
+payload is useful for conditional research, but without that first-seen
+timestamp it cannot prove the veto was available at the intended five-minute
+prediction point.
 
 ### Swing
 

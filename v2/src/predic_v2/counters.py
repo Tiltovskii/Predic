@@ -28,6 +28,22 @@ _DE_MAP_ALIASES = {
     "de_tuscan": "tuscan",
     "de_vertigo": "vertigo",
 }
+_VETO_PATTERNS = {
+    1: (2, 2, 2, 2, 2, 2, 3),
+    3: (2, 2, 1, 1, 2, 2, 3),
+    5: (2, 2, 1, 1, 1, 1, 3),
+}
+_VETO_ACTOR_COUNTS = {
+    1: (0, 3),
+    3: (1, 2),
+    5: (2, 1),
+}
+_VETO_CATEGORY_KEYS = (
+    *(f"team{side}_veto_pick_{slot}_map" for side in (1, 2) for slot in (1, 2)),
+    *(f"team{side}_veto_ban_{slot}_map" for side in (1, 2) for slot in (1, 2, 3)),
+    "veto_decider_map",
+    *(f"veto_selected_map_{slot}" for slot in range(1, 6)),
+)
 
 
 def _canonical_map_name(value: object) -> str | None:
@@ -36,6 +52,107 @@ def _canonical_map_name(value: object) -> str | None:
     if name in _UNKNOWN_MAP_NAMES:
         return None
     return _DE_MAP_ALIASES.get(name, name)
+
+
+def _strict_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped and stripped.lstrip("-").isdigit():
+            return int(stripped)
+    return None
+
+
+@dataclass(frozen=True)
+class _VetoAction:
+    order: int
+    choice_type: int
+    team_id: int | None
+    map_name: str
+
+
+def _parse_veto_actions(match: dict[str, object]) -> tuple[_VetoAction, ...] | None:
+    raw_actions = match.get("veto_actions") or "[]"
+    if isinstance(raw_actions, str):
+        try:
+            raw_actions = json.loads(raw_actions)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    if not isinstance(raw_actions, list):
+        return None
+
+    actions: list[_VetoAction] = []
+    for raw in raw_actions:
+        if not isinstance(raw, dict):
+            return None
+        order = _strict_int(raw.get("order"))
+        choice_type = _strict_int(raw.get("choice_type"))
+        map_name = _canonical_map_name(raw.get("map_name"))
+        if order is None or choice_type is None or map_name is None:
+            return None
+        team_id = _strict_int(raw.get("team_id"))
+        actions.append(_VetoAction(order, choice_type, team_id, map_name))
+    return tuple(sorted(actions, key=lambda action: action.order))
+
+
+def _strict_veto_actions(
+    match: dict[str, object],
+) -> tuple[_VetoAction, ...] | None:
+    actions = _parse_veto_actions(match)
+    bo_type = _strict_int(match.get("bo_type"))
+    team1_id = _strict_int(match.get("team1_id"))
+    team2_id = _strict_int(match.get("team2_id"))
+    if (
+        actions is None
+        or bo_type not in _VETO_PATTERNS
+        or team1_id is None
+        or team2_id is None
+        or team1_id == team2_id
+        or len(actions) != 7
+    ):
+        return None
+    if tuple(action.order for action in actions) != tuple(range(1, 8)):
+        return None
+    if tuple(action.choice_type for action in actions) != _VETO_PATTERNS[bo_type]:
+        return None
+    if len({action.map_name for action in actions}) != len(actions):
+        return None
+
+    participants = (team1_id, team2_id)
+    if any(
+        action.team_id not in participants
+        for action in actions
+        if action.choice_type in {1, 2}
+    ):
+        return None
+    if any(
+        action.team_id not in {None, 0} for action in actions if action.choice_type == 3
+    ):
+        return None
+    expected_picks, expected_bans = _VETO_ACTOR_COUNTS[bo_type]
+    for team_id in participants:
+        if (
+            sum(
+                action.choice_type == 1 and action.team_id == team_id
+                for action in actions
+            )
+            != expected_picks
+            or sum(
+                action.choice_type == 2 and action.team_id == team_id
+                for action in actions
+            )
+            != expected_bans
+        ):
+            return None
+    return actions
+
+
+def strict_veto_complete(match: dict[str, object]) -> bool:
+    """Return whether a BO1/BO3/BO5 veto is complete and side-consistent."""
+    return _strict_veto_actions(match) is not None
 
 
 def _smoothed_rate(successes: float, total: float, prior: float = 0.5) -> float:
@@ -668,6 +785,111 @@ class EnrichedCounterStore:
             "counter_map_pool_style_distance_180d": style_distance,
         }
 
+    def _selected_map_side_features(
+        self, team_id: int, selected_maps: tuple[str, ...], at: datetime
+    ) -> dict[str, float]:
+        histories: list[list[_AggregateOutcome]] = []
+        for name in selected_maps:
+            state = self.maps.get(team_id, {}).get(name)
+            histories.append(
+                []
+                if state is None
+                else [item for item in state.outcomes if _age_days(at, item.at) < 180]
+            )
+        games = sum(len(history) for history in histories)
+        wins = sum(item.win for history in histories for item in history)
+        known_maps = sum(bool(history) for history in histories)
+        rates = [
+            _smoothed_rate(sum(item.win for item in history), len(history))
+            for history in histories
+        ]
+        return {
+            "veto_selected_map_games_180d": float(games),
+            "veto_selected_maps_known_180d": float(known_maps),
+            "veto_selected_map_known_fraction_180d": (
+                known_maps / len(selected_maps) if selected_maps else 0.0
+            ),
+            "veto_selected_map_win_rate_180d": _smoothed_rate(wins, games),
+            "veto_selected_map_rate_mean_180d": _mean(rates, 0.5),
+            "veto_selected_map_rate_std_180d": _std(rates),
+        }
+
+    def _selected_map_matchup_features(
+        self,
+        team1_id: int,
+        team2_id: int,
+        selected_maps: tuple[str, ...],
+        at: datetime,
+    ) -> dict[str, float]:
+        differences: list[float] = []
+        overlap = 0
+        union_games = 0
+        for name in selected_maps:
+            histories: list[list[_AggregateOutcome]] = []
+            for team_id in (team1_id, team2_id):
+                state = self.maps.get(team_id, {}).get(name)
+                histories.append(
+                    []
+                    if state is None
+                    else [
+                        item for item in state.outcomes if _age_days(at, item.at) < 180
+                    ]
+                )
+            rates = [
+                _smoothed_rate(sum(item.win for item in history), len(history))
+                for history in histories
+            ]
+            differences.append(rates[0] - rates[1])
+            overlap += int(bool(histories[0]) and bool(histories[1]))
+            union_games += len(histories[0]) + len(histories[1])
+        return {
+            "diff_counter_veto_selected_map_matchup_mean_180d": _mean(differences),
+            "counter_veto_selected_map_matchup_range_180d": (
+                max(differences) - min(differences) if differences else 0.0
+            ),
+            "counter_veto_selected_map_matchup_std_180d": _std(differences),
+            "counter_veto_selected_map_overlap_180d": float(overlap),
+            "counter_veto_selected_map_union_games_180d": float(union_games),
+        }
+
+    def _current_veto_features(
+        self, match: dict[str, str], at: datetime
+    ) -> dict[str, float | str]:
+        result: dict[str, float | str] = {key: "missing" for key in _VETO_CATEGORY_KEYS}
+        actions = _strict_veto_actions(match)
+        result["counter_veto_complete"] = float(actions is not None)
+        selected_maps: tuple[str, ...] = ()
+        if actions is not None:
+            team1_id, team2_id = int(match["team1_id"]), int(match["team2_id"])
+            side_by_team = {team1_id: "team1", team2_id: "team2"}
+            slot_counts: dict[tuple[str, str], int] = defaultdict(int)
+            selected_maps = tuple(
+                action.map_name for action in actions if action.choice_type in {1, 3}
+            )
+            for action in actions:
+                if action.choice_type == 3:
+                    result["veto_decider_map"] = action.map_name
+                    continue
+                action_name = "pick" if action.choice_type == 1 else "ban"
+                side = side_by_team[action.team_id]
+                slot_counts[(side, action_name)] += 1
+                slot = slot_counts[(side, action_name)]
+                result[f"{side}_veto_{action_name}_{slot}_map"] = action.map_name
+            for slot, map_name in enumerate(selected_maps, start=1):
+                result[f"veto_selected_map_{slot}"] = map_name
+
+        result["counter_veto_selected_map_count"] = float(len(selected_maps))
+        team1_id, team2_id = int(match["team1_id"]), int(match["team2_id"])
+        self._add_sides(
+            result,
+            self._selected_map_side_features(team1_id, selected_maps, at),
+            self._selected_map_side_features(team2_id, selected_maps, at),
+        )
+        result.update(
+            self._selected_map_matchup_features(team1_id, team2_id, selected_maps, at)
+        )
+        return result
+
     def _h2h_features(
         self, team1_id: int, team2_id: int, at: datetime
     ) -> dict[str, float]:
@@ -714,7 +936,9 @@ class EnrichedCounterStore:
 
     @staticmethod
     def _add_sides(
-        target: dict[str, float], left: dict[str, float], right: dict[str, float]
+        target: dict[str, float | str],
+        left: dict[str, float],
+        right: dict[str, float],
     ) -> None:
         for key in sorted(set(left) | set(right)):
             left_value = left.get(key, 0.0)
@@ -729,9 +953,9 @@ class EnrichedCounterStore:
         at: datetime,
         roster1: tuple[str, ...],
         roster2: tuple[str, ...],
-    ) -> dict[str, float]:
+    ) -> dict[str, float | str]:
         team1_id, team2_id = int(match["team1_id"]), int(match["team2_id"])
-        result: dict[str, float] = {}
+        result: dict[str, float | str] = {}
         for builder in (
             lambda team_id, roster: self._team_features(team_id, at),
             lambda team_id, roster: self._player_features(team_id, roster, at),
@@ -746,6 +970,7 @@ class EnrichedCounterStore:
             )
         result.update(self._map_matchup_features(team1_id, team2_id, at))
         result.update(self._h2h_features(team1_id, team2_id, at))
+        result.update(self._current_veto_features(match, at))
         return result
 
     def update(

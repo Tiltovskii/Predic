@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .counters import EnrichedCounterStore
+from .counters import EnrichedCounterStore, strict_veto_complete
 
 _STREAM = "bo3-history-2020-2026-v2"
 _WINDOWS = (30, 90, 180)
@@ -45,6 +45,38 @@ def _parse_time(value: str) -> datetime:
 def _json_tuple(value: str) -> tuple[str, ...]:
     raw = json.loads(value)
     return tuple(str(item) for item in raw)
+
+
+def _extract_veto_actions(payload: dict[str, object]) -> list[dict[str, object]]:
+    """Keep only immutable pick/ban fields from the match-level veto payload."""
+    raw_actions = payload.get("match_maps") or []
+    if not isinstance(raw_actions, list):
+        return []
+    actions: list[dict[str, object]] = []
+    for raw in raw_actions:
+        if not isinstance(raw, dict):
+            return []
+        maps = raw.get("maps") or {}
+        if not isinstance(maps, dict):
+            return []
+        map_name = maps.get("map_name") or maps.get("slug")
+        try:
+            order = int(raw.get("order") or 0)
+            choice_type = int(raw.get("choice_type") or 0)
+            team_id = int(raw.get("team_id") or 0)
+        except (TypeError, ValueError):
+            return []
+        if not map_name or choice_type not in {1, 2, 3}:
+            return []
+        actions.append(
+            {
+                "order": order,
+                "choice_type": choice_type,
+                "team_id": team_id,
+                "map_name": str(map_name),
+            }
+        )
+    return sorted(actions, key=lambda item: (int(item["order"]), item["map_name"]))
 
 
 @dataclass(frozen=True)
@@ -218,6 +250,7 @@ def extract_bo3_match_table(
         "team2_rounds",
         "rounds_known",
         "map_results",
+        "veto_actions",
         "score_label",
     ]
     skipped = defaultdict(int)
@@ -332,6 +365,9 @@ def extract_bo3_match_table(
                     "team2_rounds": team_rounds[team2_id] if rounds_known else "",
                     "rounds_known": int(rounds_known and bool(games)),
                     "map_results": json.dumps(map_results, separators=(",", ":")),
+                    "veto_actions": json.dumps(
+                        _extract_veto_actions(payload), separators=(",", ":")
+                    ),
                     "score_label": score_label,
                 }
             )
@@ -601,6 +637,9 @@ def build_point_in_time_features(
             _json_tuple(match["team1_roster"]),
             _json_tuple(match["team2_roster"]),
         )
+        veto_known = int(
+            int(match["bo_type"]) in {1, 3} and strict_veto_complete(match)
+        )
         player1, player2 = (
             _player_features(roster1, players, at),
             _player_features(roster2, players, at),
@@ -611,6 +650,7 @@ def build_point_in_time_features(
             # Label-availability metadata. It is excluded from every model input
             # and is used only to enforce temporal training cutoffs.
             "known_at": known_at.isoformat() if known_at is not None else "",
+            "veto_known": veto_known,
             "team1_id": str(team1_id),
             "team2_id": str(team2_id),
             "team1_name": match["team1_name"],
@@ -912,16 +952,24 @@ def _mirror(frame: Any, feature_columns: list[str]) -> Any:
 def _select_feature_columns(
     frame: Any, excluded: set[str], feature_set: str
 ) -> list[str]:
-    columns = [column for column in frame.columns if column not in excluded]
-    if feature_set == "all":
+    all_columns = [column for column in frame.columns if column not in excluded]
+    veto_columns = [
+        column
+        for column in all_columns
+        if column.startswith("veto_") or "_veto_" in column
+    ]
+    columns = [column for column in all_columns if column not in veto_columns]
+    include_veto = feature_set == "core-veto"
+    base_set = "core" if include_veto else feature_set
+    if base_set == "all":
         return columns
-    if feature_set == "base":
+    if base_set == "base":
         return [
             column
             for column in columns
             if "_counter_" not in column and not column.startswith("counter_")
         ]
-    if feature_set != "core":
+    if base_set != "core":
         raise ValueError(f"unknown feature set: {feature_set}")
     support_tokens = (
         "matches",
@@ -946,12 +994,35 @@ def _select_feature_columns(
             or any(token in column for token in support_tokens)
         ):
             result.append(column)
+    if include_veto:
+        result.extend(veto_columns)
     return result
 
 
 def _labels_known_before(frame: Any, cutoff: Any) -> Any:
     """Return only rows whose result timestamp is strictly before a cutoff."""
     return frame[frame["known_at"].notna() & (frame["known_at"] < cutoff)]
+
+
+def _categorical_feature_columns(feature_columns: list[str]) -> list[str]:
+    fixed = {
+        "team1_id",
+        "team2_id",
+        "bo_type",
+        "game_version",
+        "tournament_tier",
+        "event_type",
+        "bracket_type",
+    }
+    veto_map = re.compile(
+        r"(?:team[12]_veto_(?:pick|ban)_\d+_map|"
+        r"veto_decider_map|veto_selected_map_\d+)"
+    )
+    return [
+        column
+        for column in feature_columns
+        if column in fixed or veto_map.fullmatch(column)
+    ]
 
 
 def _parse_feature_times(frame: Any, pandas: Any) -> None:
@@ -970,6 +1041,7 @@ def train_catboost_baseline(
     test_from: str = "2026-01-01",
     iterations: int = 900,
     feature_set: str = "core",
+    veto_known_only: bool = False,
 ) -> dict[str, object]:
     import numpy as np
     import pandas as pd
@@ -977,6 +1049,11 @@ def train_catboost_baseline(
 
     frame = pd.read_csv(features_csv, low_memory=False)
     _parse_feature_times(frame, pd)
+    veto_known_only = veto_known_only or feature_set == "core-veto"
+    if veto_known_only:
+        if "veto_known" not in frame:
+            raise ValueError("veto-known filtering requires a veto_known column")
+        frame = frame[frame.veto_known == 1].copy()
     train_cut = pd.Timestamp(train_before, tz="UTC")
     test_cut = pd.Timestamp(test_from, tz="UTC")
     train = _labels_known_before(frame, train_cut)
@@ -993,6 +1070,7 @@ def train_catboost_baseline(
         "match_id",
         "start_at",
         "known_at",
+        "veto_known",
         "team1_name",
         "team2_name",
         "team1_win",
@@ -1005,19 +1083,7 @@ def train_catboost_baseline(
         "sample_weight",
     }
     feature_columns = _select_feature_columns(frame, excluded, feature_set)
-    categorical = [
-        column
-        for column in (
-            "team1_id",
-            "team2_id",
-            "bo_type",
-            "game_version",
-            "tournament_tier",
-            "event_type",
-            "bracket_type",
-        )
-        if column in feature_columns
-    ]
+    categorical = _categorical_feature_columns(feature_columns)
     for partition in (train, validation, test):
         for column in categorical:
             partition[column] = partition[column].fillna("missing").astype(str)
@@ -1079,6 +1145,7 @@ def train_catboost_baseline(
             "train_rows_after_mirroring": len(augmented_train),
             "feature_set": feature_set,
             "feature_count": len(feature_columns),
+            "veto_known_only": veto_known_only,
         },
         "winner": {
             "overall": _binary_metrics(test.team1_win, probability),
@@ -1352,6 +1419,7 @@ def walk_forward_catboost_backtest(
     validation_days: int = 90,
     iterations: int = 900,
     feature_set: str = "core",
+    veto_known_only: bool = False,
 ) -> dict[str, object]:
     """Simulate a monthly production retrain without consuming future labels."""
     import pandas as pd
@@ -1359,6 +1427,11 @@ def walk_forward_catboost_backtest(
 
     frame = pd.read_csv(features_csv, low_memory=False)
     _parse_feature_times(frame, pd)
+    veto_known_only = veto_known_only or feature_set == "core-veto"
+    if veto_known_only:
+        if "veto_known" not in frame:
+            raise ValueError("veto-known filtering requires a veto_known column")
+        frame = frame[frame.veto_known == 1].copy()
     test_cut = pd.Timestamp(test_from, tz="UTC")
     if test_cut.day != 1:
         raise ValueError("test_from must be the first day of a month")
@@ -1369,6 +1442,7 @@ def walk_forward_catboost_backtest(
         "match_id",
         "start_at",
         "known_at",
+        "veto_known",
         "team1_name",
         "team2_name",
         "team1_win",
@@ -1381,19 +1455,7 @@ def walk_forward_catboost_backtest(
         "sample_weight",
     }
     feature_columns = _select_feature_columns(frame, excluded, feature_set)
-    categorical = [
-        column
-        for column in (
-            "team1_id",
-            "team2_id",
-            "bo_type",
-            "game_version",
-            "tournament_tier",
-            "event_type",
-            "bracket_type",
-        )
-        if column in feature_columns
-    ]
+    categorical = _categorical_feature_columns(feature_columns)
     for column in categorical:
         frame[column] = frame[column].fillna("missing").astype(str)
 
@@ -1522,6 +1584,7 @@ def walk_forward_catboost_backtest(
             "future_labels_used": False,
             "feature_set": feature_set,
             "feature_count": len(feature_columns),
+            "veto_known_only": veto_known_only,
         },
         "overall": overall,
         "confidence_slices": _confidence_slices(

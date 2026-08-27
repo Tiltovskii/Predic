@@ -8,7 +8,7 @@
     "teams": 4058,
     "players": 9218,
     "both_lineups_full5_rate": 0.6644878688,
-    "feature_columns_materialized": 1177
+    "feature_columns_materialized": 1219
   },
   "point_in_time_fixes": [
     "results update state at end_at rather than start_at",

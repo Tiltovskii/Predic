@@ -1,0 +1,124 @@
+{
+  "status": "retrospective_assumed_after_veto",
+  "data": {
+    "strict_bo1_bo3_veto_rows": 39090,
+    "source_range": ["2020-06-15", "2026-08-26"],
+    "bo1_rows": 6522,
+    "bo3_rows": 32568,
+    "label_eligible_train_before_2025": 24404,
+    "label_eligible_validation_2025": 8334,
+    "test_2026": 6338
+  },
+  "protocol": {
+    "comparison": "paired same veto-known cohort",
+    "retrain": "monthly full refit",
+    "validation_days": 90,
+    "test_from": "2026-01-01",
+    "core_feature_count": 762,
+    "core_veto_feature_count": 803,
+    "veto_formats": [1, 3],
+    "future_labels_used": false
+  },
+  "overall": {
+    "rows": 6338,
+    "core": {
+      "accuracy": 0.6781319028,
+      "roc_auc": 0.7384639195,
+      "logloss": 0.5924612445,
+      "brier": 0.2040712542,
+      "ece_10bin": 0.0126907401
+    },
+    "core_veto": {
+      "accuracy": 0.6760807826,
+      "roc_auc": 0.7393241481,
+      "logloss": 0.5912295020,
+      "brier": 0.2036687319,
+      "ece_10bin": 0.0104213144
+    },
+    "core_veto_minus_core": {
+      "accuracy": -0.0020511202,
+      "roc_auc": 0.0008602285,
+      "logloss": -0.0012317425,
+      "brier": -0.0004025223,
+      "ece_10bin": -0.0022694258
+    }
+  },
+  "paired_slices": {
+    "bo3": {
+      "rows": 5813,
+      "core_accuracy": 0.6772750731,
+      "core_veto_accuracy": 0.6748666781,
+      "accuracy_delta": -0.0024083950,
+      "core_logloss": 0.5950573554,
+      "core_veto_logloss": 0.5939188347
+    },
+    "bo1": {
+      "rows": 525,
+      "core_accuracy": 0.6876190476,
+      "core_veto_accuracy": 0.6895238095,
+      "accuracy_delta": 0.0019047619,
+      "core_logloss": 0.5637161163,
+      "core_veto_logloss": 0.5614521868
+    },
+    "tier_s_a": {
+      "rows": 744,
+      "core_accuracy": 0.6720430108,
+      "core_veto_accuracy": 0.6693548387,
+      "accuracy_delta": -0.0026881720,
+      "core_logloss": 0.6156499706,
+      "core_veto_logloss": 0.6172148276
+    },
+    "lan": {
+      "rows": 2140,
+      "core_accuracy": 0.7098130841,
+      "core_veto_accuracy": 0.7126168224,
+      "accuracy_delta": 0.0028037383,
+      "core_logloss": 0.5580229218,
+      "core_veto_logloss": 0.5538217592
+    },
+    "online": {
+      "rows": 4198,
+      "core_accuracy": 0.6619818961,
+      "core_veto_accuracy": 0.6574559314,
+      "accuracy_delta": -0.0045259647,
+      "core_logloss": 0.6100167497,
+      "core_veto_logloss": 0.6102987183
+    },
+    "both_lineups_full5": {
+      "rows": 6148,
+      "core_accuracy": 0.6777813923,
+      "core_veto_accuracy": 0.6764801561,
+      "accuracy_delta": -0.0013012362,
+      "core_logloss": 0.5920734513,
+      "core_veto_logloss": 0.5906173191
+    }
+  },
+  "paired_discordance": {
+    "core_only_correct": 117,
+    "core_veto_only_correct": 104,
+    "both_correct": 4181,
+    "both_wrong": 1936
+  },
+  "tournament_cluster_bootstrap": {
+    "clusters": 316,
+    "replicates": 3000,
+    "seed": 20260827,
+    "accuracy_delta_95_interval": [-0.0066272514, 0.0023447832],
+    "accuracy_delta_median": -0.0020171943,
+    "logloss_delta_95_interval": [-0.0027928937, 0.0003011009],
+    "logloss_delta_median": -0.0012406057
+  },
+  "veto_contract": [
+    "read ordered picks, bans, and decider only from match_maps",
+    "require a strict seven-action BO1 or BO3 sequence with participant-owned actions",
+    "ignore mutable maps.map_pool",
+    "never derive current selected maps from played games or final map results",
+    "derive map strength only from prior results available at known_at"
+  ],
+  "provenance_limit": {
+    "historically_point_in_time_verified_rows": 0,
+    "reason": "The archive has one post-hoc detail snapshot per task, captured on 2026-08-26, and match_maps has no publication timestamp.",
+    "required_live_field": "veto_known_at from the first prospectively observed complete veto snapshot"
+  },
+  "conclusion": "The MVP veto layer has no reliable accuracy lift on the paired 2026 cohort. It has a small probabilistic and calibration improvement, but the tournament-cluster intervals include zero."
+}

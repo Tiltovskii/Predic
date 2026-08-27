@@ -45,9 +45,11 @@ persist the announced lineup and its timestamp explicitly.
 
 ## Features
 
-The materialized table contains 1,177 columns, including excluded `known_at`
-metadata. `--feature-set base` selects 156 original/fixed features; `core`
-selects 762; `all` selects 1,164 model inputs.
+The materialized table contains 1,219 columns, including excluded `known_at`
+metadata and the optional after-veto layer. `--feature-set base` selects 156
+original/fixed features; `core` selects 762; `all` selects 1,164 model inputs.
+Those three manifests deliberately remain pre-veto. `core-veto` selects the
+same 762 core inputs plus 41 veto/map-matchup inputs, for 803 total.
 
 - causal team Elo, career record, and 1/3/7/14/30/90/180-day windows;
 - last-3/5/10/20 form, signed streak, workload, rest, volatility and trends;
@@ -64,7 +66,9 @@ selects 762; `all` selects 1,164 model inputs.
   roster-overlap and match-confidence fields.
 
 No current BO3 team rank, current player performance from the predicted match,
-actual map set/veto, odds, or BO3 AI prediction is used.
+odds, or BO3 AI prediction is used. The ordinary `base`, `core`, and `all`
+manifests also exclude the current match's map set and veto. Only the explicit
+`core-veto` prediction point includes them.
 
 ## Static temporal result
 
@@ -132,6 +136,48 @@ value are required before any betting conclusion. Since 2026 has now informed
 feature development, new future matches—not this reused slice—must become the
 next real lockbox.
 
+## Retrospective assumed after-veto result
+
+The separate `core-veto` contract answers a later question: what changes if a
+complete BO1/BO3 veto is already visible? It uses only the ordered picks, bans,
+and decider plus causal 180-day map history known before the series result. It
+never derives the selected maps from played games, final score, or map results,
+and it ignores the source's mutable current-map-pool flag.
+
+Strict veto validation yields 39,090 BO1/BO3 series: 24,404 label-eligible rows
+before 2025, 8,334 in 2025, and 6,338 in the 2026 test. Veto availability is
+strongly correlated with event tier and year, so both models below are trained
+and evaluated on this exact same cohort. Comparing `core-veto` with the general
+67.40% core result would otherwise mix feature value with selection bias.
+
+| Same-cohort monthly protocol | Inputs | Accuracy | ROC AUC | Log loss | Brier | ECE |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Core, no current veto | 762 | **67.81%** | 0.7385 | 0.5925 | 0.2041 | 0.0127 |
+| Core + current veto | 803 | 67.61% | **0.7393** | **0.5912** | **0.2037** | **0.0104** |
+
+The MVP veto layer does **not** improve threshold accuracy: the paired change
+is -0.21 percentage point. It makes the probabilities slightly better on AUC,
+log loss, Brier, and calibration. A tournament-cluster bootstrap over 316
+events gives an accuracy-delta 95% interval of -0.66 to +0.23 percentage point
+and a log-loss-delta interval of -0.00279 to +0.00030, both including zero.
+There is no reliable headline lift yet.
+
+The effect is heterogeneous and exploratory. On 5,813 BO3s, accuracy changes
+from 67.73% to 67.49% while log loss improves from 0.5951 to 0.5939. LAN moves
+from 70.98% to 71.26% with a 0.0042 log-loss improvement; online play moves
+from 66.20% to 65.75% and is slightly worse on log loss. These slices should
+not be treated as independently validated claims.
+
+This is an **assumed after-veto**, not a historically proven live point-in-time
+backtest. The archive contains one post-hoc match-detail snapshot per task,
+captured on 2026-08-26, and `match_maps` has no publication timestamp. The veto
+content is structurally consistent with a pre-map veto, but the local archive
+cannot prove that each value was visible five minutes before its match. A live
+collector must persist the first complete snapshot as `veto_known_at`; only
+prospectively timestamped rows can validate the deployable five-minute model.
+The richer team-by-map rating and series simulation should then be developed on
+a new validation period and judged on an untouched future lockbox.
+
 ## Reproduce
 
 ```bash
@@ -166,6 +212,22 @@ v2/.venv/bin/predic-data backtest-catboost-walk-forward \
   --test-from 2026-01-01 \
   --validation-days 90 \
   --feature-set core
+
+# Fair same-cohort comparison at the assumed after-veto prediction point.
+v2/.venv/bin/predic-data backtest-catboost-walk-forward \
+  --features-csv v2/data/baseline/features.csv \
+  --output-dir v2/data/baseline/walk-veto-core \
+  --test-from 2026-01-01 \
+  --validation-days 90 \
+  --feature-set core \
+  --veto-known-only
+
+v2/.venv/bin/predic-data backtest-catboost-walk-forward \
+  --features-csv v2/data/baseline/features.csv \
+  --output-dir v2/data/baseline/walk-veto-core-veto \
+  --test-from 2026-01-01 \
+  --validation-days 90 \
+  --feature-set core-veto
 ```
 
 Generated datasets, models, predictions and metrics live below `v2/data/` and

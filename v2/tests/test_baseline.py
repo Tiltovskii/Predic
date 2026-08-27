@@ -9,12 +9,15 @@ from pathlib import Path
 
 from predic_v2.baseline import (
     ExternalRankingIndex,
+    _categorical_feature_columns,
+    _extract_veto_actions,
     _labels_known_before,
     _load_lineups,
     _parse_feature_times,
     _select_feature_columns,
     build_point_in_time_features,
 )
+from predic_v2.counters import strict_veto_complete
 
 
 class ExternalRankingIndexTest(unittest.TestCase):
@@ -67,11 +70,16 @@ class ExternalRankingIndexTest(unittest.TestCase):
                     "diff_counter_win_rate_30d",
                     "team1_counter_matches_30d",
                     "counter_map_pool_overlap_180d",
+                    "team1_veto_pick_1_map",
+                    "veto_decider_map",
+                    "diff_counter_veto_selected_map_matchup_mean_180d",
+                    "veto_known",
                     "target",
                 ]
             },
         )()
-        self.assertEqual(["base"], _select_feature_columns(frame, {"target"}, "base"))
+        excluded = {"target", "veto_known"}
+        self.assertEqual(["base"], _select_feature_columns(frame, excluded, "base"))
         self.assertEqual(
             [
                 "base",
@@ -79,7 +87,100 @@ class ExternalRankingIndexTest(unittest.TestCase):
                 "team1_counter_matches_30d",
                 "counter_map_pool_overlap_180d",
             ],
-            _select_feature_columns(frame, {"target"}, "core"),
+            _select_feature_columns(frame, excluded, "core"),
+        )
+        self.assertEqual(
+            [
+                "base",
+                "diff_counter_win_rate_30d",
+                "team1_counter_matches_30d",
+                "counter_map_pool_overlap_180d",
+                "team1_veto_pick_1_map",
+                "veto_decider_map",
+                "diff_counter_veto_selected_map_matchup_mean_180d",
+            ],
+            _select_feature_columns(frame, excluded, "core-veto"),
+        )
+        self.assertEqual(
+            [
+                "base",
+                "team1_counter_win_rate_30d",
+                "diff_counter_win_rate_30d",
+                "team1_counter_matches_30d",
+                "counter_map_pool_overlap_180d",
+            ],
+            _select_feature_columns(frame, excluded, "all"),
+        )
+
+    def test_veto_map_columns_are_categorical_but_strength_is_numeric(self) -> None:
+        columns = [
+            "team1_id",
+            "team1_veto_pick_1_map",
+            "team2_veto_ban_3_map",
+            "veto_decider_map",
+            "veto_selected_map_2",
+            "team1_counter_veto_selected_map_win_rate_180d",
+        ]
+        self.assertEqual(
+            columns[:5],
+            _categorical_feature_columns(columns),
+        )
+
+    def test_extract_veto_actions_ignores_mutable_map_pool_flag(self) -> None:
+        payload = {
+            "match_maps": [
+                {
+                    "order": 1,
+                    "choice_type": 2,
+                    "team_id": 10,
+                    "maps": {
+                        "map_name": "de_cache",
+                        "map_pool": False,
+                    },
+                }
+            ]
+        }
+        self.assertEqual(
+            [
+                {
+                    "order": 1,
+                    "choice_type": 2,
+                    "team_id": 10,
+                    "map_name": "de_cache",
+                }
+            ],
+            _extract_veto_actions(payload),
+        )
+
+    def test_extract_veto_actions_fails_closed_on_extra_malformed_action(self) -> None:
+        patterns = (2, 2, 1, 1, 2, 2, 3)
+        actors = (1, 2, 1, 2, 1, 2, None)
+        names = ("nuke", "inferno", "cache", "mirage", "ancient", "anubis", "vertigo")
+        raw_actions = [
+            {
+                "order": order,
+                "choice_type": choice_type,
+                "team_id": actor,
+                "maps": {"map_name": map_name},
+            }
+            for order, (choice_type, actor, map_name) in enumerate(
+                zip(patterns, actors, names), start=1
+            )
+        ]
+        raw_actions.append({"order": 8, "choice_type": 0, "maps": {}})
+
+        extracted = _extract_veto_actions({"match_maps": raw_actions})
+
+        self.assertEqual([], extracted)
+        self.assertFalse(
+            strict_veto_complete(
+                {
+                    "bo_type": "3",
+                    "team1_id": "1",
+                    "team2_id": "2",
+                    "veto_actions": json.dumps(extracted),
+                }
+            )
         )
 
     def test_uses_strictly_previous_snapshot_and_roster_fallback(self) -> None:
