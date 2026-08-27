@@ -13,6 +13,7 @@ from predic_v2.map_baseline import (
     _cohort_map_row_ids,
     _eligible_target_rows,
     _map_categorical_columns,
+    _merge_argus_embeddings,
     _PlayedMap,
     build_map_feature_table,
 )
@@ -99,6 +100,29 @@ def _series(match: dict[str, str]) -> dict[str, object]:
 
 
 class MapBaselineTest(unittest.TestCase):
+    def test_argus_embeddings_merge_with_side_symmetric_columns(self) -> None:
+        import pandas as pd
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "embeddings.csv"
+            pd.DataFrame(
+                {
+                    "map_row_id": ["1:1"],
+                    "argus_oof_available": [1],
+                    "team1_argus_oof_000": [0.25],
+                    "team2_argus_oof_000": [-0.5],
+                    "diff_argus_oof_000": [0.75],
+                }
+            ).to_csv(path, index=False)
+            frame, columns, matched = _merge_argus_embeddings(
+                pd.DataFrame({"map_row_id": ["1:1", "2:1"]}), path, pd
+            )
+
+        self.assertEqual(1, matched)
+        self.assertEqual(4, len(columns))
+        self.assertEqual(0, frame.loc[1, "argus_oof_available"])
+        self.assertTrue(pd.isna(frame.loc[1, "team1_argus_oof_000"]))
+
     def test_cohort_metadata_requires_unique_map_rows(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "targets.jsonl"

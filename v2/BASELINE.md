@@ -292,12 +292,71 @@ exclusive correct calls (808 Argus-only versus 947 CatBoost-only). A blend
 weight searched on this reused test would be leakage; stacking must be trained
 from out-of-fold Transformer embeddings on a separate validation period.
 
-The next justified experiment is therefore not simply a larger Transformer.
-Pretrain the player encoder on the complete million-event stream, export
-strictly out-of-fold player/team embeddings, and let the proven CatBoost head
-consume them alongside its counters. Partial-roster masking can then recover
-training coverage without inventing players. Odds and a prospective veto
-lockbox remain separate requirements before any betting conclusion.
+The next experiment was therefore not simply a larger Transformer: pretrain a
+transferable player encoder on the complete event stream, export strictly
+out-of-time representations, and let the proven CatBoost head consume them.
+
+## Pretrained player Argus -> CatBoost
+
+The compact dataset format is extended to `predic-light-argus-v2`. It contains
+1,006,392 quality-gated player-map events and the same 59,641 full-roster map
+targets. The 630-event difference from the original direct-model dataset is an
+explicit rejection of non-positive match durations. Each event now also stores
+its own pre-series history indices. The audit found zero future events and zero
+current-match events in both event and target histories. Event histories have
+28.87 of 32 slots filled on average; target histories have 29.67.
+
+The 64-dimensional, two-layer player encoder is pretrained to predict the
+player's next observed map outcome and 18 normalized performance fields. The
+candidate query contains player, current organization, opponent, map,
+tournament tier, venue, and game version, but no current result or statistics.
+Player identity is disabled; organization identity is retained. Lower tiers
+are downweighted (`S=1.0`, `A=0.9`, `B=0.55`, `C=0.35`, `D=0.2`) rather than
+deleted.
+
+Exports are yearly out-of-time folds from 2021 through 2026. A fold is trained
+only on event labels known before January 1 of its year, then exports every map
+target in that year. Expanding folds warm-start sequentially so raw embedding
+coordinates do not rotate arbitrarily between years. Normalization is fixed on
+pre-2021 events. This produces 58,949 OOF map rows; the 692 targets in 2020 get
+an explicit unavailable flag. A final all-history refit is saved separately
+for future inference and is never used for historical OOF rows.
+
+The direct auxiliary map-win head is intentionally weak: its 2026 event-level
+AUC is 0.5717. The performance head is more informative: 2026 normalized RMSE
+is 1.533 versus 2.092 for the frozen pre-2021 mean baseline. For CatBoost, the
+five player outputs are averaged within each team. The selected hybrid adds 57
+semantic fields (18 predicted performance fields plus map-win probability for
+team 1, team 2, and their difference) and one availability flag to the 932
+causal counter features.
+
+| Exact player-complete 2026 cohort | Accuracy | ROC AUC | Log loss | Brier | ECE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| CatBoost counters | **64.03%** | 0.6914 | 0.62785 | 0.21956 | 0.01129 |
+| Raw Argus state only | 60.54% | 0.6468 | 0.65327 | 0.23104 | 0.02578 |
+| Auxiliary predictions only | 60.70% | 0.6513 | 0.65049 | 0.22980 | 0.02452 |
+| Counters + raw 64d states | **64.19%** | 0.6918 | 0.62761 | 0.21943 | 0.01435 |
+| Counters + all raw and auxiliary features | 63.93% | 0.6926 | 0.62692 | 0.21916 | 0.01313 |
+| Counters + 58 selected auxiliary features | 63.99% | **0.6927** | **0.62690** | **0.21914** | **0.01077** |
+
+The raw state gives 20 additional net correct maps, but its probability lift is
+not reliable. The selected semantic hybrid leaves accuracy unchanged (-0.04
+percentage point; match-cluster 95% interval -0.34 to +0.27) while improving
+log loss by 0.00095 (95% interval 0.00034 to 0.00156 better) and Brier by
+0.00043 (0.00015 to 0.00071 better). The 57 semantic features receive 4.97% of
+the latest model's total importance. Predicted map-win difference is the main
+neural feature at 2.98%, followed by equipment, deaths, KAST, and opening-death
+signals.
+
+Because 2026 had already informed development, the same chosen 58-feature
+hybrid was replicated without retuning on the 14,425 maps of 2025. The direction
+repeats: AUC rises from 0.68323 to 0.68397, log loss falls from 0.63481 to
+0.63426, and Brier falls from 0.22248 to 0.22224. Accuracy falls from 63.44% to
+63.26%. The paired 2025 intervals barely include zero for log loss (-0.00115 to
++0.00004) and Brier (-0.00051 to +0.00003), with 96.6% and 96.1% bootstrap
+probability of improvement. This is encouraging replication, not a lockbox or
+a claim of practical betting edge: the absolute lift is small, odds are still
+absent, and architecture/feature selection already used the available years.
 
 ## Reproduce
 
@@ -368,12 +427,12 @@ v2/.venv/bin/predic-data build-light-argus-dataset \
   --state-db v2/data/bo3-history-v2-state.sqlite3 \
   --matches-csv v2/data/baseline/matches.csv \
   --map-features-csv v2/data/baseline/maps-core-veto.csv \
-  --output-dir v2/data/light-argus-v1 \
+  --output-dir v2/data/light-argus-v2 \
   --max-history 32
 
 v2/.venv/bin/predic-data train-light-argus \
-  --dataset-dir v2/data/light-argus-v1 \
-  --output-dir v2/data/light-argus-v1/output-monthly \
+  --dataset-dir v2/data/light-argus-v2 \
+  --output-dir v2/data/light-argus-v2/output-monthly \
   --train-before 2025-01-01 \
   --test-from 2026-01-01 \
   --epochs 12 \
@@ -390,8 +449,34 @@ v2/.venv/bin/predic-data train-light-argus \
 # Retrain the CatBoost comparator on exactly the Argus-eligible target cohort.
 v2/.venv/bin/predic-data backtest-map-catboost-walk-forward \
   --features-csv v2/data/baseline/maps-core-veto.csv \
-  --cohort-metadata-jsonl v2/data/light-argus-v1/target_metadata.jsonl \
-  --output-dir v2/data/light-argus-v1/catboost-player-complete \
+  --cohort-metadata-jsonl v2/data/light-argus-v2/target_metadata.jsonl \
+  --output-dir v2/data/light-argus-v2/catboost-player-complete \
+  --test-from 2026-01-01 \
+  --validation-days 90
+
+# Pretrain the causal player encoder and export yearly OOF map features.
+v2/.venv/bin/predic-data pretrain-argus-embeddings \
+  --dataset-dir v2/data/light-argus-v2 \
+  --output-dir v2/data/light-argus-v2/argus-pretrain-full \
+  --first-fold-year 2021 \
+  --last-fold-year 2026 \
+  --epochs-per-fold 2 \
+  --final-refit-epochs 2 \
+  --batch-size 2048 \
+  --d-model 64 \
+  --layers 2 \
+  --heads 4 \
+  --device cuda
+
+# Add the 57 semantic auxiliary outputs and availability flag to CatBoost.
+v2/.venv/bin/predic-data backtest-map-catboost-walk-forward \
+  --features-csv v2/data/baseline/maps-core-veto.csv \
+  --cohort-metadata-jsonl v2/data/light-argus-v2/target_metadata.jsonl \
+  --argus-embeddings-csv \
+    v2/data/light-argus-v2/argus-pretrain-full/argus_oof_embeddings.csv \
+  --embedding-feature-mode combined \
+  --argus-feature-kind auxiliary \
+  --output-dir v2/data/light-argus-v2/catboost-argus-auxiliary-hybrid \
   --test-from 2026-01-01 \
   --validation-days 90
 ```

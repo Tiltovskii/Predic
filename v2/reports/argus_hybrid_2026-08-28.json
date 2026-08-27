@@ -1,0 +1,143 @@
+{
+  "status": "retrospective_assumed_after_veto",
+  "data": {
+    "format_version": "predic-light-argus-v2",
+    "quality_gated_player_map_events": 1006392,
+    "map_targets": 59641,
+    "players": 9397,
+    "teams": 4128,
+    "maps": 12,
+    "excluded_incomplete_roster_targets": 23811,
+    "excluded_non_positive_duration_events": 630,
+    "mean_event_history_maps": 28.8748,
+    "mean_target_history_maps": 29.6724,
+    "future_or_current_match_history_violations": 0
+  },
+  "pretraining": {
+    "task": "predict the next observed player-map result and 18 normalized performance fields",
+    "fold_years": [2021, 2026],
+    "fold_policy": "yearly out-of-time sequential expanding warm-start",
+    "normalisation_fit_before": 2021,
+    "current_event_outcome_in_candidate": false,
+    "player_identity": false,
+    "team_identity": true,
+    "tier_weights": {"S": 1.0, "A": 0.9, "B": 0.55, "C": 0.35, "D": 0.2},
+    "model": {
+      "transformer_layers": 2,
+      "width": 64,
+      "attention_heads": 4,
+      "history_maps_per_player": 32,
+      "total_parameters": 1041172,
+      "trainable_parameters": 439700,
+      "device": "A100 80GB"
+    },
+    "oof_map_rows": 58949,
+    "rows_before_first_fold_with_availability_zero": 692,
+    "final_refit_events": 989623,
+    "event_level_2026": {
+      "performance_normalised_rmse": 1.5330464839935303,
+      "frozen_mean_baseline_normalised_rmse": 2.0915448665618896,
+      "map_win_auc": 0.5716633859059704,
+      "map_win_logloss": 0.6844223449777754
+    },
+    "exports": {
+      "raw_state_features": 192,
+      "semantic_auxiliary_features": 57,
+      "availability_features": 1
+    }
+  },
+  "development_2026": {
+    "rows": 12650,
+    "matches": 5553,
+    "baseline_counters": {
+      "accuracy": 0.6403162055335968,
+      "roc_auc": 0.6913853095,
+      "logloss": 0.6278461927997935,
+      "brier": 0.2195634074594227,
+      "ece_10bin": 0.011293925
+    },
+    "raw_state_only": {
+      "accuracy": 0.6053754940711462,
+      "roc_auc": 0.6467916938829377,
+      "logloss": 0.653271033851944,
+      "brier": 0.23103810276832015,
+      "ece_10bin": 0.02577817146306659
+    },
+    "auxiliary_only": {
+      "accuracy": 0.6069565217391304,
+      "roc_auc": 0.6513217982004353,
+      "logloss": 0.6504903081200166,
+      "brier": 0.2298008557613563,
+      "ece_10bin": 0.024523433578556988
+    },
+    "counters_plus_raw_state": {
+      "accuracy": 0.6418972332015811,
+      "roc_auc": 0.6918248313247088,
+      "logloss": 0.6276064562386106,
+      "brier": 0.21942810295153814,
+      "ece_10bin": 0.014351859597687467
+    },
+    "counters_plus_all_argus_features": {
+      "accuracy": 0.6392885375494072,
+      "roc_auc": 0.6925901285213427,
+      "logloss": 0.6269188467396416,
+      "brier": 0.21916235725722588,
+      "ece_10bin": 0.013130424766632964
+    },
+    "selected_counters_plus_auxiliary": {
+      "accuracy": 0.6399209486166008,
+      "roc_auc": 0.6926851820809207,
+      "logloss": 0.6268977411452356,
+      "brier": 0.2191382754233865,
+      "ece_10bin": 0.010770093255236805,
+      "argus_features": 58,
+      "argus_feature_importance_total": 4.966680460176028,
+      "accuracy_delta": -0.0003952569169960474,
+      "accuracy_delta_95_interval": [-0.00340301604058532, 0.002686085504704684],
+      "logloss_delta": -0.000948451654557892,
+      "logloss_delta_95_interval": [-0.0015619456652139379, -0.00033666215027720946],
+      "brier_delta": -0.0004251320360362402,
+      "brier_delta_95_interval": [-0.000709130063451169, -0.00014551431270244883]
+    }
+  },
+  "post_selection_replication_2025": {
+    "rows": 14425,
+    "matches": 6488,
+    "baseline_counters": {
+      "accuracy": 0.6343847487001734,
+      "roc_auc": 0.6832324680682177,
+      "logloss": 0.6348081385528287,
+      "brier": 0.22248251212224762,
+      "ece_10bin": 0.009574586572460346
+    },
+    "selected_counters_plus_auxiliary": {
+      "accuracy": 0.6325823223570191,
+      "roc_auc": 0.6839749055548652,
+      "logloss": 0.6342551694859155,
+      "brier": 0.2222396244965923,
+      "ece_10bin": 0.00814989383392836,
+      "accuracy_delta": -0.001802426343154246,
+      "accuracy_delta_95_interval": [-0.004823162641331166, 0.0011073737579247484],
+      "logloss_delta": -0.0005529690669129446,
+      "logloss_delta_95_interval": [-0.0011494601633455618, 0.000041468834242947973],
+      "logloss_bootstrap_probability_better": 0.966,
+      "brier_delta": -0.00024288762565530806,
+      "brier_delta_95_interval": [-0.000510941363921463, 0.000026919327009699854],
+      "brier_bootstrap_probability_better": 0.9612
+    }
+  },
+  "paired_bootstrap": {
+    "cluster": "match_id",
+    "replicates": 5000,
+    "seed": 20260828
+  },
+  "limitations": [
+    "The 2026 cohort informed architecture and feature-family selection and is not a lockbox.",
+    "The 2025 replication was run after selecting the hybrid on 2026 and is evidence of direction, not an untouched holdout.",
+    "Historical vetoes lack first-seen timestamps, so this is not a proven live five-minute backtest.",
+    "Only targets with two captured five-player rosters are included.",
+    "Odds, market timestamps, vig, liquidity, and a prospective betting policy are absent.",
+    "The absolute probability improvement is small and needs a new prospective lockbox."
+  ],
+  "conclusion": "The pretrained player encoder is not competitive alone. Its causal semantic outputs add a small, repeatable probability-quality signal to CatBoost, while map-winner accuracy remains unchanged or slightly lower. Keep CatBoost as the winner head and validate the hybrid prospectively before any betting claim."
+}

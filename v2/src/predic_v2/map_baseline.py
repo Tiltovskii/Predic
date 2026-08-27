@@ -629,14 +629,59 @@ def _cohort_map_row_ids(metadata_jsonl: str | Path) -> set[str]:
     return result
 
 
+def _merge_argus_embeddings(frame: Any, embeddings_csv: str | Path, pd: Any):
+    embeddings = pd.read_csv(embeddings_csv, low_memory=False)
+    if (
+        "map_row_id" not in embeddings
+        or embeddings.map_row_id.astype(str).duplicated().any()
+    ):
+        raise ValueError("Argus embeddings require unique map_row_id values")
+    feature_columns = [
+        column for column in embeddings.columns if column != "map_row_id"
+    ]
+    if not feature_columns or any(
+        not (
+            column == "argus_oof_available"
+            or column.startswith(
+                (
+                    "team1_argus_oof_",
+                    "team2_argus_oof_",
+                    "diff_argus_oof_",
+                    "team1_argus_aux_",
+                    "team2_argus_aux_",
+                    "diff_argus_aux_",
+                )
+            )
+        )
+        for column in feature_columns
+    ):
+        raise ValueError("Argus embedding table has an unexpected feature schema")
+    frame = frame.copy()
+    frame["map_row_id"] = frame.map_row_id.astype(str)
+    embeddings["map_row_id"] = embeddings.map_row_id.astype(str)
+    merged = frame.merge(embeddings, on="map_row_id", how="left", validate="one_to_one")
+    if "argus_oof_available" not in merged:
+        merged["argus_oof_available"] = 1.0
+        feature_columns.append("argus_oof_available")
+    merged["argus_oof_available"] = merged.argus_oof_available.fillna(0.0)
+    matched = int((merged.argus_oof_available > 0).sum())
+    if matched == 0:
+        raise ValueError("Argus embeddings do not match the map feature table")
+    return merged, feature_columns, matched
+
+
 def walk_forward_map_catboost_backtest(
     features_csv: str | Path,
     output_dir: str | Path,
     *,
     test_from: str = "2026-01-01",
+    test_until: str | None = None,
     validation_days: int = 90,
     iterations: int = 900,
     cohort_metadata_jsonl: str | Path | None = None,
+    argus_embeddings_csv: str | Path | None = None,
+    embedding_feature_mode: str = "combined",
+    argus_feature_kind: str = "all",
 ) -> dict[str, object]:
     """Monthly point-in-time CatBoost backtest for individual map winners."""
     import numpy as np
@@ -656,13 +701,57 @@ def walk_forward_map_catboost_backtest(
             raise ValueError(f"cohort map_row_id values are missing: {sample}")
         frame = frame[frame.map_row_id.astype(str).isin(cohort_ids)].copy()
         cohort_rows = len(frame)
+    embedding_columns: list[str] = []
+    embedding_rows: int | None = None
+    if embedding_feature_mode not in {"combined", "only"}:
+        raise ValueError("embedding_feature_mode must be combined or only")
+    if argus_feature_kind not in {
+        "all",
+        "raw",
+        "raw-diff",
+        "auxiliary",
+        "auxiliary-diff",
+    }:
+        raise ValueError("unsupported argus_feature_kind")
+    if argus_embeddings_csv is not None:
+        frame, embedding_columns, embedding_rows = _merge_argus_embeddings(
+            frame, argus_embeddings_csv, pd
+        )
+    elif embedding_feature_mode == "only":
+        raise ValueError("embedding_feature_mode=only requires Argus embeddings")
+    if argus_embeddings_csv is None and argus_feature_kind != "all":
+        raise ValueError("argus_feature_kind requires Argus embeddings")
     _parse_feature_times(frame, pd)
     test_cut = pd.Timestamp(test_from, tz="UTC")
     if test_cut.day != 1:
         raise ValueError("test_from must be the first day of a month")
+    test_end = pd.Timestamp(test_until, tz="UTC") if test_until else None
+    if test_end is not None and (test_end.day != 1 or test_end <= test_cut):
+        raise ValueError("test_until must be a later first day of a month")
     if validation_days < 1:
         raise ValueError("validation_days must be positive")
-    feature_columns = _map_feature_columns(frame)
+
+    def selected_argus_column(column: str) -> bool:
+        if column == "argus_oof_available" or argus_feature_kind == "all":
+            return True
+        family = "raw" if "_argus_oof_" in column else "auxiliary"
+        requested_family = argus_feature_kind.removesuffix("-diff")
+        if family != requested_family:
+            return False
+        return not argus_feature_kind.endswith("-diff") or column.startswith("diff_")
+
+    selected_embedding_columns = [
+        column for column in embedding_columns if selected_argus_column(column)
+    ]
+    if embedding_feature_mode == "only":
+        feature_columns = selected_embedding_columns
+    else:
+        excluded_embeddings = set(embedding_columns) - set(selected_embedding_columns)
+        feature_columns = [
+            column
+            for column in _map_feature_columns(frame)
+            if column not in excluded_embeddings
+        ]
     categorical = _map_categorical_columns(feature_columns)
     for column in categorical:
         frame[column] = frame[column].fillna("missing").astype(str)
@@ -672,7 +761,11 @@ def walk_forward_map_catboost_backtest(
     fold_metrics: list[dict[str, object]] = []
     fold_predictions: list[Any] = []
     latest_model: Any | None = None
-    last_match_at = frame.start_at.max()
+    last_match_at = (
+        min(frame.start_at.max(), test_end - pd.Timedelta(seconds=1))
+        if test_end is not None
+        else frame.start_at.max()
+    )
     fold_starts = pd.date_range(test_cut, last_match_at, freq="MS")
 
     def new_model(model_iterations: int, seed: int) -> Any:
@@ -809,6 +902,7 @@ def walk_forward_map_catboost_backtest(
     metrics: dict[str, object] = {
         "protocol": {
             "test_from": test_from,
+            "test_until": test_until,
             "retrain": "monthly_full_refit",
             "validation_days": validation_days,
             "future_labels_used": False,
@@ -816,6 +910,12 @@ def walk_forward_map_catboost_backtest(
             "feature_count": len(feature_columns),
             "cohort_filter": cohort_metadata_jsonl is not None,
             "cohort_rows": cohort_rows,
+            "argus_embeddings": argus_embeddings_csv is not None,
+            "argus_embedding_rows": embedding_rows,
+            "embedding_feature_mode": embedding_feature_mode,
+            "embedding_feature_count": len(embedding_columns),
+            "selected_embedding_feature_count": len(selected_embedding_columns),
+            "argus_feature_kind": argus_feature_kind,
         },
         "overall": overall,
         "confidence_slices": _confidence_slices(

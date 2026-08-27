@@ -432,9 +432,21 @@ def _parser() -> argparse.ArgumentParser:
     map_walk_forward_parser.add_argument("--features-csv", required=True)
     map_walk_forward_parser.add_argument("--output-dir", required=True)
     map_walk_forward_parser.add_argument("--test-from", default="2026-01-01")
+    map_walk_forward_parser.add_argument("--test-until")
     map_walk_forward_parser.add_argument("--validation-days", type=int, default=90)
     map_walk_forward_parser.add_argument("--iterations", type=int, default=900)
     map_walk_forward_parser.add_argument("--cohort-metadata-jsonl")
+    map_walk_forward_parser.add_argument("--argus-embeddings-csv")
+    map_walk_forward_parser.add_argument(
+        "--embedding-feature-mode",
+        choices=("combined", "only"),
+        default="combined",
+    )
+    map_walk_forward_parser.add_argument(
+        "--argus-feature-kind",
+        choices=("all", "raw", "raw-diff", "auxiliary", "auxiliary-diff"),
+        default="all",
+    )
 
     argus_data_parser = subparsers.add_parser(
         "build-light-argus-dataset",
@@ -475,6 +487,31 @@ def _parser() -> argparse.ArgumentParser:
     argus_train_parser.add_argument("--max-validation-rows", type=int)
     argus_train_parser.add_argument("--max-test-rows", type=int)
     argus_train_parser.add_argument("--catboost-predictions-csv")
+
+    argus_pretrain_parser = subparsers.add_parser(
+        "pretrain-argus-embeddings",
+        help="Pretrain player histories and export out-of-time map embeddings",
+    )
+    argus_pretrain_parser.add_argument("--dataset-dir", required=True)
+    argus_pretrain_parser.add_argument("--output-dir", required=True)
+    argus_pretrain_parser.add_argument("--first-fold-year", type=int, default=2021)
+    argus_pretrain_parser.add_argument("--last-fold-year", type=int, default=2026)
+    argus_pretrain_parser.add_argument("--epochs-per-fold", type=int, default=2)
+    argus_pretrain_parser.add_argument("--final-refit-epochs", type=int, default=2)
+    argus_pretrain_parser.add_argument("--batch-size", type=int, default=512)
+    argus_pretrain_parser.add_argument("--learning-rate", type=float, default=2e-4)
+    argus_pretrain_parser.add_argument("--weight-decay", type=float, default=0.01)
+    argus_pretrain_parser.add_argument("--d-model", type=int, default=64)
+    argus_pretrain_parser.add_argument("--layers", type=int, default=2)
+    argus_pretrain_parser.add_argument("--heads", type=int, default=4)
+    argus_pretrain_parser.add_argument("--dropout", type=float, default=0.10)
+    argus_pretrain_parser.add_argument("--use-player-identity", action="store_true")
+    argus_pretrain_parser.add_argument("--no-team-identity", action="store_true")
+    argus_pretrain_parser.add_argument("--device", default="auto")
+    argus_pretrain_parser.add_argument("--seed", type=int, default=20260828)
+    argus_pretrain_parser.add_argument("--max-train-events", type=int)
+    argus_pretrain_parser.add_argument("--max-evaluation-events", type=int)
+    argus_pretrain_parser.add_argument("--max-target-rows", type=int)
     return parser
 
 
@@ -769,9 +806,13 @@ def main() -> None:
             args.features_csv,
             args.output_dir,
             test_from=args.test_from,
+            test_until=args.test_until,
             validation_days=args.validation_days,
             iterations=args.iterations,
             cohort_metadata_jsonl=args.cohort_metadata_jsonl,
+            argus_embeddings_csv=args.argus_embeddings_csv,
+            embedding_feature_mode=args.embedding_feature_mode,
+            argus_feature_kind=args.argus_feature_kind,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return
@@ -816,6 +857,33 @@ def main() -> None:
             max_validation_rows=args.max_validation_rows,
             max_test_rows=args.max_test_rows,
             catboost_predictions_csv=args.catboost_predictions_csv,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    if args.command == "pretrain-argus-embeddings":
+        from .argus_pretrain import pretrain_and_export_argus_embeddings
+
+        result = pretrain_and_export_argus_embeddings(
+            args.dataset_dir,
+            args.output_dir,
+            first_fold_year=args.first_fold_year,
+            last_fold_year=args.last_fold_year,
+            epochs_per_fold=args.epochs_per_fold,
+            final_refit_epochs=args.final_refit_epochs,
+            batch_size=args.batch_size,
+            learning_rate=args.learning_rate,
+            weight_decay=args.weight_decay,
+            d_model=args.d_model,
+            layers=args.layers,
+            heads=args.heads,
+            dropout=args.dropout,
+            use_player_identity=args.use_player_identity,
+            use_team_identity=not args.no_team_identity,
+            device=args.device,
+            seed=args.seed,
+            max_train_events=args.max_train_events,
+            max_evaluation_events=args.max_evaluation_events,
+            max_target_rows=args.max_target_rows,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return

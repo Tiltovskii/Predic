@@ -12,7 +12,7 @@ from typing import Any
 
 from .counters import canonical_map_name
 
-FORMAT_VERSION = "predic-light-argus-v1"
+FORMAT_VERSION = "predic-light-argus-v2"
 DEFAULT_STREAM = "bo3-history-2020-2026-v2"
 
 EVENT_NUMERIC_FIELDS = (
@@ -254,6 +254,40 @@ def _history_indices(
     return result
 
 
+def _event_history_index_matrix(
+    player_offsets: Any,
+    event_known_ts: Any,
+    event_start_ts: Any,
+    event_match_id: Any,
+    *,
+    max_history: int,
+) -> Any:
+    """Build histories available at each event's pre-series prediction point."""
+    import numpy as np
+
+    result = np.full((len(event_known_ts), max_history), -1, dtype=np.int32)
+    steps = np.arange(max_history, 0, -1, dtype=np.int64)
+    for player_id in range(len(player_offsets) - 1):
+        begin = int(player_offsets[player_id])
+        finish = int(player_offsets[player_id + 1])
+        if begin == finish:
+            continue
+        known = event_known_ts[begin:finish]
+        starts = event_start_ts[begin:finish]
+        eligible_ends = np.searchsorted(known, starts, side="right")
+        local_indices = eligible_ends[:, None] - steps[None, :]
+        valid = local_indices >= 0
+        selected = np.where(valid, begin + local_indices, -1).astype(np.int32)
+        selected_safe = np.maximum(selected, 0)
+        if np.any(
+            valid
+            & (event_match_id[selected_safe] == event_match_id[begin:finish, None])
+        ):
+            raise ValueError("current match leaked into an event pretrain history")
+        result[begin:finish] = selected
+    return result
+
+
 def _save_array(output: Path, name: str, value: Any) -> None:
     import numpy as np
 
@@ -364,6 +398,7 @@ def build_light_argus_dataset(
     event_tier = np.empty(event_capacity, dtype=np.int16)
     event_event_type = np.empty(event_capacity, dtype=np.int16)
     event_version = np.empty(event_capacity, dtype=np.int16)
+    event_start_ts = np.empty(event_capacity, dtype=np.int64)
     event_known_ts = np.empty(event_capacity, dtype=np.int64)
     event_match_id = np.empty(event_capacity, dtype=np.int64)
     event_game_id = np.empty(event_capacity, dtype=np.int64)
@@ -400,7 +435,11 @@ def build_light_argus_dataset(
         if len(teams) != 2:
             skip_event("not_two_teams", len(payload))
             continue
+        start_ts = _timestamp(str(game["start_date"]))
         known_ts = _timestamp(str(game["end_date"]))
+        if known_ts <= start_ts:
+            skip_event("non_positive_match_duration", len(payload))
+            continue
         map_name = canonical_map_name(game["map_name"])
         rounds = float(game["rounds_count"] or 0)
         if map_name is None or rounds <= 0:
@@ -434,6 +473,7 @@ def build_light_argus_dataset(
             event_tier[event_count] = tier_vocab.get(context.tier, 0)
             event_event_type[event_count] = event_type_vocab.get(context.event_type, 0)
             event_version[event_count] = version_vocab.get(context.game_version, 0)
+            event_start_ts[event_count] = start_ts
             event_known_ts[event_count] = known_ts
             event_match_id[event_count] = int(game["match_id"])
             event_game_id[event_count] = int(game["game_id"])
@@ -456,6 +496,7 @@ def build_light_argus_dataset(
         "event_tier": event_tier[:event_count],
         "event_event_type": event_event_type[:event_count],
         "event_version": event_version[:event_count],
+        "event_start_ts": event_start_ts[:event_count],
         "event_known_ts": event_known_ts[:event_count],
         "event_match_id": event_match_id[:event_count],
         "event_game_id": event_game_id[:event_count],
@@ -476,6 +517,13 @@ def build_light_argus_dataset(
     )
     player_offsets[1:] = np.cumsum(counts)
     arrays["player_offsets"] = player_offsets
+    arrays["event_history_indices"] = _event_history_index_matrix(
+        player_offsets,
+        arrays["event_known_ts"],
+        arrays["event_start_ts"],
+        arrays["event_match_id"],
+        max_history=max_history,
+    )
     for name, value in arrays.items():
         _save_array(output, name, value)
 
@@ -661,6 +709,7 @@ def build_light_argus_dataset(
         "skipped_targets": skipped_targets,
         "causal_contract": {
             "history_cutoff": "event known_at <= target start_at",
+            "pretrain_history_cutoff": "history known_at <= event start_at",
             "current_series_excluded": True,
             "history_order": "known_at, match_id, game_id",
             "candidate_contains_outcome": False,

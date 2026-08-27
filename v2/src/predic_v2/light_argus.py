@@ -74,9 +74,11 @@ class _ArrayStore:
         "event_tier",
         "event_event_type",
         "event_version",
+        "event_start_ts",
         "event_known_ts",
         "event_match_id",
         "event_game_id",
+        "event_history_indices",
         "player_offsets",
     )
     _TARGET_ARRAYS = (
@@ -259,6 +261,20 @@ class _BatchCollator:
         players = np.where(self.normalisation.seen_players[players], players, 0)
         teams = np.asarray(self.data.target_teams[indices], dtype=np.int64)
         teams = np.where(self.normalisation.seen_teams[teams], teams, 0)
+        candidate_team = np.concatenate(
+            (
+                np.broadcast_to(teams[:, :1], (len(indices), 5)),
+                np.broadcast_to(teams[:, 1:], (len(indices), 5)),
+            ),
+            axis=1,
+        )
+        candidate_opponent = np.concatenate(
+            (
+                np.broadcast_to(teams[:, 1:], (len(indices), 5)),
+                np.broadcast_to(teams[:, :1], (len(indices), 5)),
+            ),
+            axis=1,
+        )
         side_numeric = _normalise(
             np.asarray(self.data.target_side_numeric[indices], dtype=np.float32),
             self.normalisation.side_mean,
@@ -286,6 +302,27 @@ class _BatchCollator:
             ),
             "target_players": players,
             "target_teams": teams,
+            "candidate_player": players,
+            "candidate_team": candidate_team,
+            "candidate_opponent": candidate_opponent,
+            "candidate_map": np.broadcast_to(
+                np.asarray(self.data.target_map[indices], dtype=np.int64)[:, None],
+                (len(indices), 10),
+            ).copy(),
+            "candidate_tier": np.broadcast_to(
+                np.asarray(self.data.target_tier[indices], dtype=np.int64)[:, None],
+                (len(indices), 10),
+            ).copy(),
+            "candidate_event_type": np.broadcast_to(
+                np.asarray(self.data.target_event_type[indices], dtype=np.int64)[
+                    :, None
+                ],
+                (len(indices), 10),
+            ).copy(),
+            "candidate_version": np.broadcast_to(
+                np.asarray(self.data.target_version[indices], dtype=np.int64)[:, None],
+                (len(indices), 10),
+            ).copy(),
             "target_side_numeric": side_numeric,
             "target_shared_numeric": shared_numeric,
             "target_map": np.asarray(self.data.target_map[indices], dtype=np.int64),
@@ -422,12 +459,16 @@ class LightTargetAwareArgus(nn.Module):
             device=team_ids.device,
         )
 
-    def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    def _encode_with_query(
+        self, batch: dict[str, torch.Tensor], query: torch.Tensor
+    ) -> torch.Tensor:
         mask = batch["history_mask"]
         batch_size, players, history_length = mask.shape
-        if players != 10 or history_length != self.config.max_history:
-            raise ValueError("Light Argus expects ten fixed-length player histories")
-        player_embedding = self._player_identity(batch["target_players"])
+        if history_length != self.config.max_history:
+            raise ValueError("unexpected Light Argus history length")
+        if query.shape != (batch_size, players, self.config.d_model):
+            raise ValueError("candidate query and history layouts disagree")
+        player_embedding = self._player_identity(batch["candidate_player"])
         history = self.event_numeric_projection(batch["event_numeric"])
         history = history + player_embedding[:, :, None, :]
         history = history + self._team_identity(batch["event_team"])
@@ -440,27 +481,8 @@ class LightTargetAwareArgus(nn.Module):
         history = history + self.position_embedding(positions)[None, None, :, :]
         history = history + self.token_type_embedding.weight[0]
 
-        current_teams = torch.cat(
-            (
-                batch["target_teams"][:, :1].expand(-1, 5),
-                batch["target_teams"][:, 1:].expand(-1, 5),
-            ),
-            dim=1,
-        )
-        side_numeric = torch.cat(
-            (
-                batch["target_side_numeric"][:, :1].expand(-1, 5, -1),
-                batch["target_side_numeric"][:, 1:].expand(-1, 5, -1),
-            ),
-            dim=1,
-        )
-        shared = self._shared_embedding(batch)
-        query = player_embedding + self._team_identity(current_teams)
-        query = query + self.side_numeric_projection(side_numeric)
-        query = query + shared[:, None, :]
         query = query + self.position_embedding.weight[history_length]
         query = query + self.token_type_embedding.weight[1]
-
         tokens = torch.cat((history, query[:, :, None, :]), dim=2)
         tokens = self.input_norm(tokens).reshape(
             batch_size * players, history_length + 1, self.config.d_model
@@ -475,7 +497,38 @@ class LightTargetAwareArgus(nn.Module):
             dim=2,
         ).reshape(batch_size * players, history_length + 1)
         encoded = self.history_encoder(tokens, src_key_padding_mask=padding)
-        player_states = encoded[:, -1].reshape(batch_size, players, self.config.d_model)
+        return encoded[:, -1].reshape(batch_size, players, self.config.d_model)
+
+    def encode_candidate_players(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Encode histories with a context-only candidate, without its outcome."""
+        query = self._player_identity(batch["candidate_player"])
+        query = query + self._team_identity(batch["candidate_team"])
+        query = query + 0.5 * self._team_identity(batch["candidate_opponent"])
+        query = query + self.map_embedding(batch["candidate_map"])
+        query = query + self.tier_embedding(batch["candidate_tier"])
+        query = query + self.event_type_embedding(batch["candidate_event_type"])
+        query = query + self.version_embedding(batch["candidate_version"])
+        return self._encode_with_query(batch, query)
+
+    def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        mask = batch["history_mask"]
+        _, players, history_length = mask.shape
+        if players != 10 or history_length != self.config.max_history:
+            raise ValueError("Light Argus expects ten fixed-length player histories")
+        player_embedding = self._player_identity(batch["target_players"])
+        current_teams = batch["candidate_team"]
+        side_numeric = torch.cat(
+            (
+                batch["target_side_numeric"][:, :1].expand(-1, 5, -1),
+                batch["target_side_numeric"][:, 1:].expand(-1, 5, -1),
+            ),
+            dim=1,
+        )
+        shared = self._shared_embedding(batch)
+        query = player_embedding + self._team_identity(current_teams)
+        query = query + self.side_numeric_projection(side_numeric)
+        query = query + shared[:, None, :]
+        player_states = self._encode_with_query(batch, query)
 
         def pool(roster: torch.Tensor) -> torch.Tensor:
             return self.roster_pool(
@@ -514,6 +567,13 @@ def swap_batch_sides(
         "event_event_type",
         "event_version",
         "target_players",
+        "candidate_player",
+        "candidate_team",
+        "candidate_opponent",
+        "candidate_map",
+        "candidate_tier",
+        "candidate_event_type",
+        "candidate_version",
     ):
         result[key] = torch.cat((batch[key][:, 5:], batch[key][:, :5]), dim=1)
     result["target_teams"] = batch["target_teams"].flip(1)
