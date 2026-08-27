@@ -305,7 +305,7 @@ def build_light_argus_dataset(
     *,
     raw_dir: str | Path | None = None,
     stream: str = DEFAULT_STREAM,
-    max_history: int = 32,
+    max_history: int = 64,
 ) -> dict[str, object]:
     """Build a compact causal player-history dataset for map prediction."""
     import numpy as np

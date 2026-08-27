@@ -458,7 +458,7 @@ def _parser() -> argparse.ArgumentParser:
     argus_data_parser.add_argument("--output-dir", required=True)
     argus_data_parser.add_argument("--raw-dir")
     argus_data_parser.add_argument("--stream", default="bo3-history-2020-2026-v2")
-    argus_data_parser.add_argument("--max-history", type=int, default=32)
+    argus_data_parser.add_argument("--max-history", type=int, default=64)
 
     argus_train_parser = subparsers.add_parser(
         "train-light-argus",

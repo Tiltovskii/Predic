@@ -358,6 +358,33 @@ probability of improvement. This is encouraging replication, not a lockbox or
 a claim of practical betting edge: the absolute lift is small, odds are still
 absent, and architecture/feature selection already used the available years.
 
+### Player history length: 32 -> 64
+
+The next controlled ablation changes only `max_history`. With 64 events, a
+target player has 56.60 prior maps on average instead of 29.67; the median is
+64 and 80.75% of target-player sequences are full. Both versions contain the
+same 1,006,392 events and 59,641 targets. The h64 audit again finds zero future
+events and zero current-match events. Model width, layers, auxiliary tasks,
+yearly OOF folds, seed, optimizer, and CatBoost protocol are unchanged. The
+extra positional embeddings add only 2,048 parameters.
+
+| Cohort and model | Accuracy | ROC AUC | Log loss | Brier | ECE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 2026 counters + h32 auxiliary | 63.99% | 0.69269 | 0.62690 | 0.21914 | **0.01077** |
+| 2026 counters + h64 auxiliary | **64.13%** | **0.69315** | **0.62647** | **0.21898** | 0.01295 |
+| 2025 counters + h32 auxiliary | 63.26% | **0.68397** | **0.63426** | **0.22224** | 0.00815 |
+| 2025 counters + h64 auxiliary | **63.39%** | 0.68334 | 0.63451 | 0.22236 | **0.00732** |
+
+H64 adds 17 net correct maps in 2026 and 19 in 2025. Against h32, however, the
+match-cluster intervals include zero in both years. On the combined 27,075-map
+cohort, accuracy rises by 0.133 percentage point (95% interval -0.081 to
++0.347), while log loss changes by only -0.000065 (-0.000507 to +0.000385) and
+Brier by -0.000009 (-0.000216 to +0.000197). H64 is therefore the new research
+default because its accuracy direction repeats and it improves the latest-year
+probabilities, but it is not a proven replacement for h32. The next history
+experiment should compare recency-biased 64/128 retrieval on a new lockbox,
+rather than selecting again on these two reused years.
+
 ## Reproduce
 
 ```bash
@@ -428,7 +455,7 @@ v2/.venv/bin/predic-data build-light-argus-dataset \
   --matches-csv v2/data/baseline/matches.csv \
   --map-features-csv v2/data/baseline/maps-core-veto.csv \
   --output-dir v2/data/light-argus-v2 \
-  --max-history 32
+  --max-history 64
 
 v2/.venv/bin/predic-data train-light-argus \
   --dataset-dir v2/data/light-argus-v2 \

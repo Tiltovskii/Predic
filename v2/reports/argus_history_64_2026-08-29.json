@@ -1,0 +1,100 @@
+{
+  "status": "retrospective_assumed_after_veto",
+  "experiment": "player history length 32 versus 64",
+  "controlled_variables": [
+    "source events and target cohort",
+    "yearly out-of-time folds",
+    "normalisation period",
+    "model width, layers and heads",
+    "auxiliary tasks and tier weights",
+    "optimizer, epochs and seed",
+    "CatBoost features, seed and monthly cutoffs"
+  ],
+  "data": {
+    "events": 1006392,
+    "targets": 59641,
+    "history_32": {
+      "mean_event_history": 28.874750594201863,
+      "mean_target_player_history": 29.672376385372477,
+      "full_target_player_rate": 0.8802652537683808
+    },
+    "history_64": {
+      "mean_event_history": 54.19223523239454,
+      "mean_target_player_history": 56.59645042839657,
+      "full_target_player_rate": 0.8075049043443269
+    },
+    "history_64_future_events": 0,
+    "history_64_current_match_events": 0
+  },
+  "model": {
+    "history_32_total_parameters": 1041172,
+    "history_64_total_parameters": 1043220,
+    "history_64_trainable_parameters": 441748,
+    "history_64_training_device": "A100 80GB",
+    "history_64_observed_gpu_memory_mib": 6646,
+    "history_64_wall_time_minutes_approx": 4.5
+  },
+  "auxiliary_event_evaluation": {
+    "2025": {
+      "history_32": {"normalised_rmse": 1.839732050895691, "map_win_auc": 0.5630758254253891, "map_win_logloss": 0.6869424929021521},
+      "history_64": {"normalised_rmse": 1.8387364149093628, "map_win_auc": 0.5637383516603744, "map_win_logloss": 0.6871552343936581}
+    },
+    "2026": {
+      "history_32": {"normalised_rmse": 1.5330464839935303, "map_win_auc": 0.5716633859059704, "map_win_logloss": 0.6844223449777754},
+      "history_64": {"normalised_rmse": 1.5348585844039917, "map_win_auc": 0.5735867533304678, "map_win_logloss": 0.6840469508265169}
+    }
+  },
+  "catboost_hybrid": {
+    "2026": {
+      "rows": 12650,
+      "matches": 5553,
+      "history_32": {"accuracy": 0.6399209486166009, "roc_auc": 0.6926851820809207, "logloss": 0.6268977411452357, "brier": 0.21913827542338649, "ece_10bin": 0.010770093255236805},
+      "history_64": {"accuracy": 0.6412648221343874, "roc_auc": 0.6931480132002351, "logloss": 0.6264705636623655, "brier": 0.2189790860190009, "ece_10bin": 0.012946337695277114},
+      "history_64_minus_32": {
+        "accuracy": 0.0013438735177865612,
+        "accuracy_95_interval": [-0.0018170434752535147, 0.004457303546083096],
+        "logloss": -0.00042717748287008083,
+        "logloss_95_interval": [-0.0010868945692259439, 0.00022056132925227752],
+        "brier": -0.00015918940438561338,
+        "brier_95_interval": [-0.0004635554582417917, 0.0001416338372776693]
+      }
+    },
+    "2025": {
+      "rows": 14425,
+      "matches": 6488,
+      "history_32": {"accuracy": 0.6325823223570191, "roc_auc": 0.6839749055548652, "logloss": 0.6342551694859158, "brier": 0.22223962449659235, "ece_10bin": 0.00814989383392836},
+      "history_64": {"accuracy": 0.6338994800693241, "roc_auc": 0.683341011673646, "logloss": 0.6345080120836769, "brier": 0.22236197244587488, "ece_10bin": 0.007318591099963853},
+      "history_64_minus_32": {
+        "accuracy": 0.001317157712305026,
+        "accuracy_95_interval": [-0.0017285756181725017, 0.004345719976486566],
+        "logloss": 0.0002528425977611651,
+        "logloss_95_interval": [-0.00035541630961249845, 0.0008536801191767108],
+        "brier": 0.00012234794928256415,
+        "brier_95_interval": [-0.00015105581186981775, 0.0003941629617588436]
+      }
+    },
+    "combined_2025_2026_history_64_minus_32": {
+      "rows": 27075,
+      "matches": 12041,
+      "net_additional_correct_maps": 36,
+      "accuracy": 0.001329639889196676,
+      "accuracy_95_interval": [-0.0008137193258846199, 0.003471489054597599],
+      "logloss": -0.00006487684896035885,
+      "logloss_95_interval": [-0.0005065253776739625, 0.00038514389870223905],
+      "brier": -0.000009192125469142076,
+      "brier_95_interval": [-0.00021595989500280315, 0.0001968941763486065]
+    }
+  },
+  "paired_bootstrap": {
+    "cluster": "match_id within year",
+    "replicates": 5000,
+    "seed": 20260829
+  },
+  "decision": "Use 64 as the research default, but retain 32 as the control. H64 adds 36 net correct calls across both years and improves 2026 probability metrics, while combined probability quality is statistically indistinguishable from h32.",
+  "limitations": [
+    "Both 2025 and 2026 were available during model development and neither is a fresh lockbox.",
+    "The h64 versus h32 confidence intervals include zero for every paired metric.",
+    "Historical veto timestamps and market odds are still absent.",
+    "Longer dense attention increases compute and does not guarantee useful retrieval from the older tail."
+  ]
+}
