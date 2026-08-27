@@ -1,8 +1,8 @@
 # Predic v2 data layer
 
-The causal CatBoost winner/series-score/round-share baselines, enriched counter
-sets, monthly walk-forward metrics, and the separate assumed after-veto
-experiment are documented with reproduction commands in
+The causal CatBoost series and individual-map winner baselines, enriched
+counter sets, monthly walk-forward metrics, and the separate assumed after-veto
+experiments are documented with reproduction commands in
 [BASELINE.md](BASELINE.md).
 
 This directory contains the point-in-time data foundation for a CS/CS2 match

@@ -54,6 +54,11 @@ def _canonical_map_name(value: object) -> str | None:
     return _DE_MAP_ALIASES.get(name, name)
 
 
+def canonical_map_name(value: object) -> str | None:
+    """Return the public canonical map key used by every modeling layer."""
+    return _canonical_map_name(value)
+
+
 def _strict_int(value: object) -> int | None:
     if isinstance(value, bool):
         return None

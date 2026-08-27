@@ -1,0 +1,160 @@
+{
+  "status": "retrospective_assumed_after_veto",
+  "data": {
+    "map_targets": 83464,
+    "series": 38429,
+    "label_eligible_train_before_2025": 51126,
+    "label_eligible_validation_2025": 17959,
+    "test_2026": 14363,
+    "test_matches": 6281,
+    "test_bo1": 525,
+    "test_bo3_maps": 13838,
+    "excluded_no_strict_veto_series": 33916,
+    "excluded_unsupported_bo5_series": 276,
+    "excluded_veto_played_map_mismatch_series": 661
+  },
+  "protocol": {
+    "target": "winner of one named played map",
+    "prediction_point": "complete veto before series start",
+    "retrain": "monthly full refit",
+    "validation_days": 90,
+    "test_from": "2026-01-01",
+    "feature_count": 932,
+    "future_labels_used": false,
+    "within_series_results_used": false,
+    "map_state_update": "series known_at"
+  },
+  "overall": {
+    "rows": 14363,
+    "accuracy": 0.6379586437,
+    "roc_auc": 0.6905984230,
+    "logloss": 0.6302358844,
+    "brier": 0.2204119660,
+    "ece_10bin": 0.0160018627
+  },
+  "baselines": {
+    "series_team_elo": {
+      "accuracy": 0.6108751654,
+      "roc_auc": 0.6508357664,
+      "logloss": 0.6575002159,
+      "brier": 0.2322796952,
+      "ece_10bin": 0.0372111583
+    },
+    "target_map_elo": {
+      "accuracy": 0.5858803871,
+      "roc_auc": 0.6159592601,
+      "logloss": 0.6701040282,
+      "brier": 0.2386422000,
+      "ece_10bin": 0.0302263201
+    },
+    "constant_0_5": {
+      "accuracy": 0.5464039546,
+      "roc_auc": 0.5,
+      "logloss": 0.6931471806
+    }
+  },
+  "delta_vs_series_team_elo": {
+    "accuracy": 0.0270834784,
+    "roc_auc": 0.0397626566,
+    "logloss": -0.0272643315,
+    "brier": -0.0118677293,
+    "ece_10bin": -0.0212092956
+  },
+  "match_cluster_bootstrap": {
+    "clusters": 6281,
+    "replicates": 3000,
+    "seed": 20260827,
+    "model_accuracy_95_interval": [0.6296630704, 0.6461120916],
+    "accuracy_delta_vs_series_team_elo_95_interval": [0.0203450687, 0.0337833731],
+    "logloss_delta_vs_series_team_elo_95_interval": [-0.0308061431, -0.0235235925]
+  },
+  "slices": {
+    "bo1": {
+      "rows": 525,
+      "accuracy": 0.6933333333,
+      "roc_auc": 0.7455935996,
+      "logloss": 0.5720876702
+    },
+    "bo3_all_maps": {
+      "rows": 13838,
+      "accuracy": 0.6358577829,
+      "roc_auc": 0.6876638356,
+      "logloss": 0.6324419700
+    },
+    "bo3_map1": {
+      "rows": 5756,
+      "accuracy": 0.6381167477,
+      "roc_auc": 0.6927324628,
+      "logloss": 0.6304212154
+    },
+    "bo3_map2": {
+      "rows": 5756,
+      "accuracy": 0.6542738013,
+      "roc_auc": 0.7086780753,
+      "logloss": 0.6185755921
+    },
+    "bo3_decider": {
+      "rows": 2326,
+      "accuracy": 0.5846947549,
+      "roc_auc": 0.6162240496,
+      "logloss": 0.6717568170
+    },
+    "pick_maps": {
+      "rows": 11512,
+      "accuracy": 0.6461952745,
+      "roc_auc": 0.7010568426,
+      "logloss": 0.6244984038,
+      "pick_owner_win_rate": 0.5421299514
+    },
+    "lan": {
+      "rows": 4467,
+      "accuracy": 0.6668905306,
+      "roc_auc": 0.7234387806,
+      "logloss": 0.6069154866
+    },
+    "online": {
+      "rows": 9896,
+      "accuracy": 0.6248989491,
+      "roc_auc": 0.6746491538,
+      "logloss": 0.6407625837
+    },
+    "tier_s_a": {
+      "rows": 1690,
+      "accuracy": 0.6218934911,
+      "roc_auc": 0.6558778376,
+      "logloss": 0.6534453984
+    }
+  },
+  "confidence_slices": {
+    "at_least_0_60": {
+      "rows": 7585,
+      "coverage": 0.5280930168,
+      "accuracy": 0.7131179960,
+      "mean_confidence": 0.6872863043
+    },
+    "at_least_0_65": {
+      "rows": 4910,
+      "coverage": 0.3418505883,
+      "accuracy": 0.7598778004,
+      "mean_confidence": 0.7220233645
+    },
+    "at_least_0_70": {
+      "rows": 2749,
+      "coverage": 0.1913945555,
+      "accuracy": 0.8162968352,
+      "mean_confidence": 0.7598298811
+    }
+  },
+  "leading_features_latest_fold": [
+    "diff_player_elo_mean",
+    "diff_counter_ewm_opponent_elo_90d",
+    "diff_player_elo_max",
+    "diff_counter_context_tier_round_share",
+    "diff_elo",
+    "minimum player experience on both sides",
+    "target-map pick owner",
+    "target-map support and rolling round share"
+  ],
+  "provenance_limit": "Historical vetoes lack first-seen timestamps; this is not a proven live five-minute backtest.",
+  "conclusion": "Individual picked maps are predictably above Elo baselines, but pre-series BO3 deciders remain close to noise."
+}

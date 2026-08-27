@@ -178,6 +178,55 @@ prospectively timestamped rows can validate the deployable five-minute model.
 The richer team-by-map rating and series simulation should then be developed on
 a new validation period and judged on an untouched future lockbox.
 
+## Individual-map winner baseline
+
+The map baseline answers the narrower after-veto question directly: which side
+wins this named map? One row is one played map whose identity can be matched
+unambiguously to a strict BO1/BO3 veto. Every map in a series receives the same
+pre-series team/player state. Map results update target-map Elo and rolling
+form only at the series `known_at`, so Map 1 cannot leak into Map 2 or the
+decider. Played-map scores and winners are retained only as targets/QC fields.
+
+The dataset contains 83,464 map targets from 38,429 series: 51,126
+label-eligible rows before 2025, 17,959 in 2025, and 14,363 in the 2026 test.
+The model uses 932 inputs: the 803 `core-veto` series features, target map,
+pick/decider role, and causal target-map Elo/form counters.
+
+| 2026 monthly map protocol | Accuracy | ROC AUC | Log loss | Brier | ECE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Target-map Elo only | 58.59% | 0.6160 | 0.6701 | 0.2386 | 0.0302 |
+| Series team Elo only | 61.09% | 0.6508 | 0.6575 | 0.2323 | 0.0372 |
+| Map CatBoost | **63.80%** | **0.6906** | **0.6302** | **0.2204** | **0.0160** |
+
+Against series Elo, CatBoost adds 2.71 percentage points of accuracy and cuts
+log loss by 0.0273. A paired bootstrap clustered by 6,281 matches gives a 95%
+interval of +2.03 to +3.38 percentage points for the accuracy delta and -0.0308
+to -0.0235 for the log-loss delta. The model's own accuracy interval is 62.97%
+to 64.61% on this reused development test.
+
+| Slice | Rows | Accuracy | ROC AUC | Log loss |
+| --- | ---: | ---: | ---: | ---: |
+| BO1 | 525 | 69.33% | 0.7456 | 0.5721 |
+| BO3, all played maps | 13,838 | 63.59% | 0.6877 | 0.6324 |
+| BO3 Map 1 | 5,756 | 63.81% | 0.6927 | 0.6304 |
+| BO3 Map 2 | 5,756 | **65.43%** | **0.7087** | **0.6186** |
+| BO3 decider | 2,326 | 58.47% | 0.6162 | 0.6718 |
+| LAN | 4,467 | 66.69% | 0.7234 | 0.6069 |
+| Online | 9,896 | 62.49% | 0.6746 | 0.6408 |
+| Tier S/A | 1,690 | 62.19% | 0.6559 | 0.6534 |
+
+The two picked maps are meaningfully predictable at 64.62% combined, while
+simply backing the map's pick owner wins only 54.21%. Pre-series deciders are
+hard because reaching Map 3 selects close series and the prediction does not
+yet observe Maps 1–2. A separate live decider refresh could legitimately use
+those completed maps at that later prediction point.
+
+At model confidence at least 0.60, accuracy is 71.31% on 52.81% coverage; at
+0.65 it is 75.99% on 34.19%; at 0.70 it is 81.63% on 19.14%. These are
+predictive confidence slices, not betting returns: odds, their timestamps,
+selection rules, and a prospective lockbox are still absent. The same
+historical `veto_known_at` limitation from the preceding section applies.
+
 ## Reproduce
 
 ```bash
@@ -228,6 +277,18 @@ v2/.venv/bin/predic-data backtest-catboost-walk-forward \
   --test-from 2026-01-01 \
   --validation-days 90 \
   --feature-set core-veto
+
+v2/.venv/bin/predic-data build-map-baseline-features \
+  --matches-csv v2/data/baseline/matches.csv \
+  --series-features-csv v2/data/baseline/features.csv \
+  --output-csv v2/data/baseline/maps-core-veto.csv \
+  --series-feature-set core-veto
+
+v2/.venv/bin/predic-data backtest-map-catboost-walk-forward \
+  --features-csv v2/data/baseline/maps-core-veto.csv \
+  --output-dir v2/data/baseline/walk-map-core-veto \
+  --test-from 2026-01-01 \
+  --validation-days 90
 ```
 
 Generated datasets, models, predictions and metrics live below `v2/data/` and

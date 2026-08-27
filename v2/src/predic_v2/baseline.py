@@ -942,10 +942,11 @@ def _mirror(frame: Any, feature_columns: list[str]) -> Any:
     mirrored["team1_win"] = 1 - frame["team1_win"]
     if "round_share_target" in frame:
         mirrored["round_share_target"] = 1.0 - frame["round_share_target"]
-    score_swap = {"2-0": "0-2", "2-1": "1-2", "1-2": "2-1", "0-2": "2-0"}
-    mirrored["score_label"] = (
-        frame["score_label"].map(score_swap).fillna(frame["score_label"])
-    )
+    if "score_label" in frame:
+        score_swap = {"2-0": "0-2", "2-1": "1-2", "1-2": "2-1", "0-2": "2-0"}
+        mirrored["score_label"] = (
+            frame["score_label"].map(score_swap).fillna(frame["score_label"])
+        )
     return mirrored
 
 

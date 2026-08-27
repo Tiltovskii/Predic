@@ -37,6 +37,10 @@ from .hltv_discovery import (
 )
 from .hltv_offline import parse_file, records_to_jsonl
 from .legacy import import_legacy_csv
+from .map_baseline import (
+    build_map_feature_table,
+    walk_forward_map_catboost_backtest,
+)
 from .materialize import materialize_raw_stream
 from .raw_jsonl import import_jsonl
 from .tedtay import import_tedtay_dataset
@@ -407,6 +411,29 @@ def _parser() -> argparse.ArgumentParser:
         default="core",
     )
     walk_forward_parser.add_argument("--veto-known-only", action="store_true")
+
+    map_features_parser = subparsers.add_parser(
+        "build-map-baseline-features",
+        help="Expand causal series features into strict after-veto map rows",
+    )
+    map_features_parser.add_argument("--matches-csv", required=True)
+    map_features_parser.add_argument("--series-features-csv", required=True)
+    map_features_parser.add_argument("--output-csv", required=True)
+    map_features_parser.add_argument(
+        "--series-feature-set",
+        choices=("base", "core", "all", "core-veto"),
+        default="core-veto",
+    )
+
+    map_walk_forward_parser = subparsers.add_parser(
+        "backtest-map-catboost-walk-forward",
+        help="Backtest an individual-map winner model with monthly refits",
+    )
+    map_walk_forward_parser.add_argument("--features-csv", required=True)
+    map_walk_forward_parser.add_argument("--output-dir", required=True)
+    map_walk_forward_parser.add_argument("--test-from", default="2026-01-01")
+    map_walk_forward_parser.add_argument("--validation-days", type=int, default=90)
+    map_walk_forward_parser.add_argument("--iterations", type=int, default=900)
     return parser
 
 
@@ -684,6 +711,25 @@ def main() -> None:
             iterations=args.iterations,
             feature_set=args.feature_set,
             veto_known_only=args.veto_known_only,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    if args.command == "build-map-baseline-features":
+        result = build_map_feature_table(
+            args.matches_csv,
+            args.series_features_csv,
+            args.output_csv,
+            series_feature_set=args.series_feature_set,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    if args.command == "backtest-map-catboost-walk-forward":
+        result = walk_forward_map_catboost_backtest(
+            args.features_csv,
+            args.output_dir,
+            test_from=args.test_from,
+            validation_days=args.validation_days,
+            iterations=args.iterations,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return
