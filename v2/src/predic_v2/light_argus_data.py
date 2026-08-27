@@ -74,6 +74,41 @@ SIDE_NUMERIC_SUFFIXES = (
     "target_map_win_rate_90d",
     "target_map_round_share_90d",
 )
+ROUND_STYLE_SIDE_NUMERIC_SUFFIXES = (
+    *(
+        f"counter_round_style_{name}_{window}d"
+        for window in (30, 180)
+        for name in (
+            "rounds",
+            "economy_coverage",
+            "pistol_win_rate",
+            "full_buy_duel_win_rate",
+            "low_buy_upset_rate",
+            "opening_conversion",
+            "opening_recovery",
+            "close_round_win_rate",
+            "trade_kills_per_round",
+            "flash_assists_per_round",
+            "grenades_damage_per_round",
+            "utility_value_per_round",
+        )
+    ),
+    *(
+        f"target_map_round_style_{name}_180d"
+        for name in (
+            "rounds",
+            "pistol_win_rate",
+            "full_buy_duel_win_rate",
+            "low_buy_upset_rate",
+            "opening_conversion",
+            "opening_recovery",
+            "close_round_win_rate",
+            "trade_kills_per_round",
+            "utility_value_per_round",
+        )
+    ),
+)
+SIDE_NUMERIC_SUFFIXES += ROUND_STYLE_SIDE_NUMERIC_SUFFIXES
 SIDE_NUMERIC_FIELDS = SIDE_NUMERIC_SUFFIXES + ("target_map_pick",)
 SHARED_NUMERIC_FIELDS = (
     "log_prize",
@@ -551,6 +586,7 @@ def build_light_argus_dataset(
             f"{side}_{suffix}"
             for side in ("team1", "team2")
             for suffix in SIDE_NUMERIC_SUFFIXES
+            if suffix not in ROUND_STYLE_SIDE_NUMERIC_SUFFIXES
         }
         missing_columns = required_columns - set(reader.fieldnames or ())
         if missing_columns:
@@ -603,7 +639,8 @@ def build_light_argus_dataset(
             ]
             for side_index, side in enumerate(("team1", "team2")):
                 values = [
-                    _float(row[f"{side}_{suffix}"]) for suffix in SIDE_NUMERIC_SUFFIXES
+                    _float(row.get(f"{side}_{suffix}"))
+                    for suffix in SIDE_NUMERIC_SUFFIXES
                 ]
                 values.append(_float(row[f"{side}_target_map_pick"]))
                 target_arrays["target_side_numeric"][target_count, side_index] = values

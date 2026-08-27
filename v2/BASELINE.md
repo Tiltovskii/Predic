@@ -400,6 +400,42 @@ about 15.9 times larger than at h256 (248.7 times h64). The next long-history
 ablation should keep a recent window and retrieve or chunk selected older maps,
 then evaluate on a new untouched time period.
 
+## Implemented next ablations (not yet measured)
+
+The following changes are wired as explicit ablations. None of them changes the
+historical results above, and no quality claim should be made until each is run
+with the same temporal folds and several neural seeds.
+
+- The match extractor now reduces already captured complete `game_rounds` into
+  additive per-team numerators and denominators. Causal 30/180-day team and
+  target-map counters cover T/CT, pistols, eco/force/full-buy contexts,
+  full-buy duels, low-buy upsets, openings and recoveries, close/trailing
+  rounds, after-win/after-loss conversion, clutches, trades, utility, damage,
+  hit rate, equipment, and spend. Missing round payloads remain missing support;
+  they are never imputed as zero-performance maps. These are round-style
+  features, not HLTV Swing: the archive has no kill-by-kill probability path
+  needed to reproduce that metric exactly.
+- `train-light-argus` defaults to a compact low-rank DCNv2 parallel cross/deep
+  fusion head. The same scorer is evaluated in both team orders and the two
+  scores are subtracted, preserving exact logit antisymmetry. The
+  `--fusion-head mlp` option keeps the historical head for a controlled
+  comparison.
+- Both the direct neural head and final CatBoost map head accept `dataset`,
+  `balanced`, `tier1`, and `uniform` weight profiles. `tier1` retains every row
+  but assigns `S/A/B/C/D = 1.0/0.8/0.25/0.12/0.05`. Reports include separate
+  S, A, B, and C+D slices plus effective training mass. Compare probability
+  calibration as well as accuracy because weighting can improve ranking while
+  shifting logits.
+- `pretrain-argus-embeddings --auxiliary-target-profile form-v2` keeps the
+  separate next-map winner task and the denser transferable performance targets,
+  while dropping duplicated damage and weak rare/count/equipment targets. The
+  binary map-winner target is unchanged. The legacy 18-field objective remains
+  the default so old runs and checkpoints stay reproducible.
+
+Run these as a factorial ablation rather than turning every flag on at once:
+round counters first, then tier weights, then DCNv2, then `form-v2`. Direct
+neural log loss/Brier/ECE and downstream CatBoost quality are separate outcomes.
+
 ## Reproduce
 
 ```bash
@@ -483,6 +519,10 @@ v2/.venv/bin/predic-data train-light-argus \
   --d-model 128 \
   --layers 3 \
   --heads 4 \
+  --fusion-head dcnv2 \
+  --cross-layers 2 \
+  --cross-rank 32 \
+  --tier-weight-profile dataset \
   --learning-rate 0.0002 \
   --monthly-refit \
   --catboost-predictions-csv \
@@ -508,6 +548,7 @@ v2/.venv/bin/predic-data pretrain-argus-embeddings \
   --d-model 64 \
   --layers 2 \
   --heads 4 \
+  --auxiliary-target-profile form-v2 \
   --device cuda
 
 # Add the 57 semantic auxiliary outputs and availability flag to CatBoost.
@@ -518,6 +559,7 @@ v2/.venv/bin/predic-data backtest-map-catboost-walk-forward \
     v2/data/light-argus-v2/argus-pretrain-full/argus_oof_embeddings.csv \
   --embedding-feature-mode combined \
   --argus-feature-kind auxiliary \
+  --tier-weight-profile tier1 \
   --output-dir v2/data/light-argus-v2/catboost-argus-auxiliary-hybrid \
   --test-from 2026-01-01 \
   --validation-days 90

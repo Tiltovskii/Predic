@@ -4,6 +4,9 @@ The causal CatBoost series and individual-map winner baselines, the Light
 Argus player-history Transformer, its 256-event pretrained out-of-time embedding
 hybrid, enriched counter sets, monthly walk-forward metrics, and the separate
 assumed after-veto experiments are documented in [BASELINE.md](BASELINE.md).
+The next controlled ablations include causal round/economy counters, a compact
+antisymmetric DCNv2 fusion head, selectable tier weighting, and a reduced
+`form-v2` player-pretraining target profile.
 
 This directory contains the point-in-time data foundation for a CS/CS2 match
 prediction project. Network capture is disabled by default. The HLTV collector

@@ -23,7 +23,18 @@ from .baseline import (
     _parse_time,
     _select_feature_columns,
 )
-from .counters import canonical_map_name, strict_veto_complete
+from .counters import (
+    RoundStyleOutcome,
+    canonical_map_name,
+    round_stats_for_team,
+    round_style_features,
+    strict_veto_complete,
+)
+from .weighting import (
+    TIER_WEIGHT_PROFILES,
+    effective_tier_weight_mass,
+    tier_weight,
+)
 
 _MAP_WINDOWS = (30, 90, 180, 365)
 _MAP_LAST_COUNTS = (5, 10)
@@ -108,6 +119,8 @@ class _PlayedMap:
     loser_team_id: int
     winner_score: int | None
     loser_score: int | None
+    winner_round_stats: dict[str, float] | None = None
+    loser_round_stats: dict[str, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -115,6 +128,7 @@ class _MapOutcome:
     at: datetime
     win: float
     round_share: float | None
+    round_stats: dict[str, float] | None
 
 
 @dataclass
@@ -128,7 +142,12 @@ class _MapState:
     outcomes: deque[_MapOutcome] = field(default_factory=deque)
 
     def add(
-        self, at: datetime, win: float, round_share: float | None, elo_delta: float
+        self,
+        at: datetime,
+        win: float,
+        round_share: float | None,
+        elo_delta: float,
+        round_stats: dict[str, float] | None = None,
     ) -> None:
         self.elo += elo_delta
         self.matches += 1
@@ -137,7 +156,7 @@ class _MapState:
             self.round_share_sum += round_share
             self.round_known += 1
         self.last_at = at
-        self.outcomes.append(_MapOutcome(at, win, round_share))
+        self.outcomes.append(_MapOutcome(at, win, round_share, round_stats))
         while self.outcomes and _age_days(at, self.outcomes[0].at) >= 365:
             self.outcomes.popleft()
 
@@ -206,7 +225,15 @@ def _played_maps(match: dict[str, str]) -> tuple[_PlayedMap, ...]:
         if winner_score is None or loser_score is None:
             winner_score = loser_score = None
         results.append(
-            _PlayedMap(map_name, int(winner), int(loser), winner_score, loser_score)
+            _PlayedMap(
+                map_name,
+                int(winner),
+                int(loser),
+                winner_score,
+                loser_score,
+                round_stats_for_team(raw, int(winner)),
+                round_stats_for_team(raw, int(loser)),
+            )
         )
     return tuple(results)
 
@@ -322,6 +349,15 @@ class _CausalMapStore:
                     ),
                 }
             )
+        style = round_style_features(
+            [
+                RoundStyleOutcome(item.at, item.round_stats)
+                for item in outcomes
+                if item.round_stats is not None
+            ],
+            at,
+        )
+        result.update({f"target_map_{key}": value for key, value in style.items()})
         return result
 
     def features(
@@ -362,8 +398,20 @@ class _CausalMapStore:
             )
             winner_share = game.winner_score / total if total else None
             loser_share = game.loser_score / total if total else None
-            winner.add(at, 1.0, winner_share, delta)
-            loser.add(at, 0.0, loser_share, -delta)
+            winner.add(
+                at,
+                1.0,
+                winner_share,
+                delta,
+                round_stats=game.winner_round_stats,
+            )
+            loser.add(
+                at,
+                0.0,
+                loser_share,
+                -delta,
+                round_stats=game.loser_round_stats,
+            )
 
 
 def _map_counter_feature_names() -> list[str]:
@@ -589,6 +637,10 @@ def _slice_metrics(predictions: Any) -> dict[str, object]:
             & (predictions.target_map_slot.astype(str) == "3")
         ),
         "tier_s_a": metrics(predictions.tournament_tier.isin(["s", "a"])),
+        "tier_s": metrics(predictions.tournament_tier.eq("s")),
+        "tier_a": metrics(predictions.tournament_tier.eq("a")),
+        "tier_b": metrics(predictions.tournament_tier.eq("b")),
+        "tier_c_d": metrics(predictions.tournament_tier.isin(["c", "d"])),
         "lan": metrics(predictions.event_type.str.casefold() == "lan"),
         "online": metrics(predictions.event_type.str.casefold() == "online"),
         "team1_pick": metrics(predictions.team1_target_map_pick == 1),
@@ -682,6 +734,7 @@ def walk_forward_map_catboost_backtest(
     argus_embeddings_csv: str | Path | None = None,
     embedding_feature_mode: str = "combined",
     argus_feature_kind: str = "all",
+    tier_weight_profile: str = "dataset",
 ) -> dict[str, object]:
     """Monthly point-in-time CatBoost backtest for individual map winners."""
     import numpy as np
@@ -689,6 +742,13 @@ def walk_forward_map_catboost_backtest(
     from catboost import CatBoostClassifier, Pool
 
     frame = pd.read_csv(features_csv, low_memory=False)
+    if tier_weight_profile not in {"dataset", *TIER_WEIGHT_PROFILES}:
+        choices = ", ".join(("dataset", *sorted(TIER_WEIGHT_PROFILES)))
+        raise ValueError(f"unknown tier weight profile; choose {choices}")
+    if tier_weight_profile != "dataset":
+        frame["sample_weight"] = [
+            tier_weight(tier, tier_weight_profile) for tier in frame.tournament_tier
+        ]
     cohort_rows: int | None = None
     if cohort_metadata_jsonl is not None:
         if frame.map_row_id.astype(str).duplicated().any():
@@ -916,6 +976,11 @@ def walk_forward_map_catboost_backtest(
             "embedding_feature_count": len(embedding_columns),
             "selected_embedding_feature_count": len(selected_embedding_columns),
             "argus_feature_kind": argus_feature_kind,
+            "tier_weight_profile": tier_weight_profile,
+            "effective_tier_weight_mass": effective_tier_weight_mass(
+                history.tournament_tier.tolist(),
+                history.sample_weight.astype(float).tolist(),
+            ),
         },
         "overall": overall,
         "confidence_slices": _confidence_slices(

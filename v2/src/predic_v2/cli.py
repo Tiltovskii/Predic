@@ -448,6 +448,12 @@ def _parser() -> argparse.ArgumentParser:
         choices=("all", "raw", "raw-diff", "auxiliary", "auxiliary-diff"),
         default="all",
     )
+    map_walk_forward_parser.add_argument(
+        "--tier-weight-profile",
+        choices=("dataset", "balanced", "tier1", "uniform"),
+        default="dataset",
+        help="Override training weights without rebuilding the feature table",
+    )
 
     argus_data_parser = subparsers.add_parser(
         "build-light-argus-dataset",
@@ -480,6 +486,16 @@ def _parser() -> argparse.ArgumentParser:
     argus_train_parser.add_argument("--layers", type=int, default=3)
     argus_train_parser.add_argument("--heads", type=int, default=4)
     argus_train_parser.add_argument("--dropout", type=float, default=0.10)
+    argus_train_parser.add_argument(
+        "--fusion-head", choices=("mlp", "dcnv2"), default="dcnv2"
+    )
+    argus_train_parser.add_argument("--cross-layers", type=int, default=2)
+    argus_train_parser.add_argument("--cross-rank", type=int, default=32)
+    argus_train_parser.add_argument(
+        "--tier-weight-profile",
+        choices=("dataset", "balanced", "tier1", "uniform"),
+        default="dataset",
+    )
     argus_train_parser.add_argument("--no-player-identity", action="store_true")
     argus_train_parser.add_argument("--no-team-identity", action="store_true")
     argus_train_parser.add_argument("--device", default="auto")
@@ -515,6 +531,11 @@ def _parser() -> argparse.ArgumentParser:
     argus_pretrain_parser.add_argument("--max-train-events", type=int)
     argus_pretrain_parser.add_argument("--max-evaluation-events", type=int)
     argus_pretrain_parser.add_argument("--max-target-rows", type=int)
+    argus_pretrain_parser.add_argument(
+        "--auxiliary-target-profile",
+        choices=("legacy", "form-v2"),
+        default="legacy",
+    )
     return parser
 
 
@@ -816,6 +837,7 @@ def main() -> None:
             argus_embeddings_csv=args.argus_embeddings_csv,
             embedding_feature_mode=args.embedding_feature_mode,
             argus_feature_kind=args.argus_feature_kind,
+            tier_weight_profile=args.tier_weight_profile,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return
@@ -850,6 +872,10 @@ def main() -> None:
             layers=args.layers,
             heads=args.heads,
             dropout=args.dropout,
+            fusion_head=args.fusion_head,
+            cross_layers=args.cross_layers,
+            cross_rank=args.cross_rank,
+            tier_weight_profile=args.tier_weight_profile,
             use_player_identity=not args.no_player_identity,
             use_team_identity=not args.no_team_identity,
             device=args.device,
@@ -887,6 +913,7 @@ def main() -> None:
             max_train_events=args.max_train_events,
             max_evaluation_events=args.max_evaluation_events,
             max_target_rows=args.max_target_rows,
+            auxiliary_target_profile=args.auxiliary_target_profile,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return

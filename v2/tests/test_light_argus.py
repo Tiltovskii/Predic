@@ -11,6 +11,7 @@ except ModuleNotFoundError as error:  # pragma: no cover - optional dependency
         "Light Argus optional dependency is not installed"
     ) from error
 
+from predic_v2.argus_pretrain import auxiliary_regression_fields
 from predic_v2.light_argus import (
     LightArgusConfig,
     LightTargetAwareArgus,
@@ -26,6 +27,19 @@ from predic_v2.light_argus_data import (
 
 
 class LightArgusDataTest(unittest.TestCase):
+    def test_form_v2_auxiliary_profile_drops_duplicate_and_noisy_targets(self) -> None:
+        names = {
+            EVENT_NUMERIC_FIELDS[index]
+            for index in auxiliary_regression_fields("form-v2")
+        }
+
+        self.assertIn("player_rating", names)
+        self.assertIn("adr", names)
+        self.assertNotIn("damage_per_round", names)
+        self.assertNotIn("won_map", names)
+        self.assertNotIn("participation_fraction", names)
+        self.assertNotIn("log_equipment_per_round", names)
+
     def test_history_is_right_aligned_and_cut_at_target_start(self) -> None:
         offsets = np.array([0, 0, 3, 5], dtype=np.int64)
         known = np.array([100, 200, 300, 150, 250], dtype=np.int64)
@@ -160,7 +174,7 @@ class LightArgusModelTest(unittest.TestCase):
             "target_weight": torch.ones(batch),
         }
 
-    def _model(self) -> LightTargetAwareArgus:
+    def _model(self, fusion_head: str = "mlp") -> LightTargetAwareArgus:
         return LightTargetAwareArgus(
             LightArgusConfig(
                 player_vocab_size=20,
@@ -179,18 +193,25 @@ class LightArgusModelTest(unittest.TestCase):
                 layers=2,
                 heads=4,
                 dropout=0.0,
+                fusion_head=fusion_head,
+                cross_layers=2,
+                cross_rank=8,
             )
         ).eval()
 
     def test_side_swap_negates_logit_exactly(self) -> None:
-        model = self._model()
-        batch = self._batch()
+        for fusion_head in ("mlp", "dcnv2"):
+            with self.subTest(fusion_head=fusion_head):
+                model = self._model(fusion_head)
+                batch = self._batch()
 
-        with torch.inference_mode():
-            direct = model(batch)
-            mirrored = model(swap_batch_sides(batch))
+                with torch.inference_mode():
+                    direct = model(batch)
+                    mirrored = model(swap_batch_sides(batch))
 
-        torch.testing.assert_close(direct, -mirrored, atol=1e-6, rtol=1e-6)
+                torch.testing.assert_close(
+                    direct, -mirrored, atol=1e-6, rtol=1e-6
+                )
 
     def test_candidate_map_is_early_bound_into_encoder(self) -> None:
         model = self._model()

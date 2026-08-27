@@ -32,6 +32,28 @@ _WIN_FIELD = EVENT_NUMERIC_FIELDS.index("won_map")
 _REGRESSION_FIELDS = tuple(
     index for index in range(len(EVENT_NUMERIC_FIELDS)) if index != _WIN_FIELD
 )
+_AUXILIARY_TARGET_PROFILES = {
+    "legacy": _REGRESSION_FIELDS,
+    # Remove duplicated damage, weak rare-event/count and equipment targets.
+    # Map win remains a separate classification target in every profile.
+    "form-v2": tuple(
+        EVENT_NUMERIC_FIELDS.index(name)
+        for name in (
+            "kills_per_round",
+            "deaths_per_round",
+            "assists_per_round",
+            "adr",
+            "kast",
+            "player_rating",
+            "headshot_share",
+            "opening_kills_per_round",
+            "opening_deaths_per_round",
+            "trade_kills_per_round",
+            "trade_deaths_per_round",
+            "hit_rate",
+        )
+    ),
+}
 _TIER_WEIGHTS = {"s": 1.0, "a": 0.9, "b": 0.55, "c": 0.35, "d": 0.2}
 
 
@@ -191,18 +213,33 @@ class _EventPretrainCollator:
         }
 
 
+def auxiliary_regression_fields(profile: str) -> tuple[int, ...]:
+    try:
+        return _AUXILIARY_TARGET_PROFILES[profile]
+    except KeyError as error:
+        choices = ", ".join(sorted(_AUXILIARY_TARGET_PROFILES))
+        raise ValueError(f"unknown auxiliary target profile; choose {choices}") from error
+
+
 class PlayerEventAuxiliaryModel(nn.Module):
     """Pretrain the shared player encoder on the next observed map performance."""
 
-    def __init__(self, backbone: LightTargetAwareArgus):
+    def __init__(
+        self,
+        backbone: LightTargetAwareArgus,
+        regression_fields: tuple[int, ...] = _REGRESSION_FIELDS,
+    ):
         super().__init__()
+        if not regression_fields or _WIN_FIELD in regression_fields:
+            raise ValueError("regression fields must be non-empty and exclude won_map")
         self.backbone = backbone
+        self.regression_fields = tuple(regression_fields)
         dimension = backbone.config.d_model
         self.regression_head = nn.Sequential(
             nn.LayerNorm(dimension),
             nn.Linear(dimension, 2 * dimension),
             nn.GELU(),
-            nn.Linear(2 * dimension, len(_REGRESSION_FIELDS)),
+            nn.Linear(2 * dimension, len(self.regression_fields)),
         )
         self.win_head = nn.Sequential(
             nn.LayerNorm(dimension),
@@ -222,8 +259,9 @@ def _auxiliary_loss(
     regression: torch.Tensor,
     win_logit: torch.Tensor,
     batch: dict[str, torch.Tensor],
+    regression_fields: tuple[int, ...] = _REGRESSION_FIELDS,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    fields = torch.as_tensor(_REGRESSION_FIELDS, device=regression.device)
+    fields = torch.as_tensor(regression_fields, device=regression.device)
     target = batch["target_numeric"].index_select(1, fields)
     mask = batch["target_mask"].index_select(1, fields)
     row_mse = ((regression - target).square() * mask).sum(dim=1)
@@ -277,7 +315,10 @@ def _train_auxiliary(
             with _autocast(device):
                 regression, win_logit = model(batch)
                 loss, regression_loss, win_loss = _auxiliary_loss(
-                    regression, win_logit, batch
+                    regression,
+                    win_logit,
+                    batch,
+                    model.regression_fields,
                 )
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -345,12 +386,12 @@ def _evaluate_auxiliary(
     mask = np.concatenate(masks)
     win_target = np.concatenate(win_targets)
     win_valid = np.concatenate(win_masks).astype(bool)
-    regression_target = target[:, _REGRESSION_FIELDS]
-    regression_mask = mask[:, _REGRESSION_FIELDS]
+    regression_target = target[:, model.regression_fields]
+    regression_mask = mask[:, model.regression_fields]
     squared = np.square(prediction - regression_target)
     baseline_squared = np.square(regression_target)
     field_metrics: dict[str, object] = {}
-    for output_index, field_index in enumerate(_REGRESSION_FIELDS):
+    for output_index, field_index in enumerate(model.regression_fields):
         valid = regression_mask[:, output_index]
         if not valid.any():
             continue
@@ -463,6 +504,7 @@ def pretrain_and_export_argus_embeddings(
     max_train_events: int | None = None,
     max_evaluation_events: int | None = None,
     max_target_rows: int | None = None,
+    auxiliary_target_profile: str = "legacy",
 ) -> dict[str, object]:
     """Sequentially pretrain and export strictly out-of-time map embeddings."""
     import pandas as pd
@@ -471,6 +513,7 @@ def pretrain_and_export_argus_embeddings(
         raise ValueError("first_fold_year must not exceed last_fold_year")
     if min(epochs_per_fold, final_refit_epochs, batch_size) < 1:
         raise ValueError("epoch counts and batch_size must be positive")
+    regression_fields = auxiliary_regression_fields(auxiliary_target_profile)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -506,6 +549,10 @@ def pretrain_and_export_argus_embeddings(
         "max_train_events": max_train_events,
         "max_evaluation_events": max_evaluation_events,
         "max_target_rows": max_target_rows,
+        "auxiliary_target_profile": auxiliary_target_profile,
+        "auxiliary_regression_fields": [
+            EVENT_NUMERIC_FIELDS[index] for index in regression_fields
+        ],
         "coordinate_policy": "sequential expanding warm-start",
     }
     config_path = output / "run_config.json"
@@ -527,7 +574,9 @@ def pretrain_and_export_argus_embeddings(
     fixed_stats = _finite_stats(
         np.asarray(data.event_numeric[first_train], dtype=np.float32)
     )
-    model = PlayerEventAuxiliaryModel(LightTargetAwareArgus(config))
+    model = PlayerEventAuxiliaryModel(
+        LightTargetAwareArgus(config), regression_fields=regression_fields
+    )
     event_known = np.asarray(data.event_known_ts)
     event_history_count = (np.asarray(data.event_history_indices) >= 0).sum(axis=1)
     target_starts = np.asarray(data.target_start_ts)
@@ -702,7 +751,7 @@ def pretrain_and_export_argus_embeddings(
             team1[:, dimension] - team2[:, dimension]
         )
     auxiliary_fields = [
-        *(EVENT_NUMERIC_FIELDS[index] for index in _REGRESSION_FIELDS),
+        *(EVENT_NUMERIC_FIELDS[index] for index in model.regression_fields),
         "map_win_probability",
     ]
     for dimension, field in enumerate(auxiliary_fields):
@@ -759,6 +808,7 @@ def pretrain_and_export_argus_embeddings(
             "player_identity": use_player_identity,
             "team_identity": use_team_identity,
             "current_event_outcome_in_candidate": False,
+            "auxiliary_target_profile": auxiliary_target_profile,
         },
         "model": {
             **asdict(config),

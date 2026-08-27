@@ -106,6 +106,61 @@ class EnrichedCounterStoreTest(unittest.TestCase):
         self.assertFalse(store.maps.get(1))
         self.assertFalse(store.maps.get(2))
 
+    def test_round_style_counters_are_causal_and_symmetric(self) -> None:
+        store = EnrichedCounterStore()
+        at = datetime(2025, 1, 1, tzinfo=UTC)
+        match = _match(map_names=("cache",))
+        results = json.loads(match["map_results"])
+        results[0]["round_stats"] = {
+            "1": {
+                "rounds": 10,
+                "wins": 6,
+                "pistol_rounds": 2,
+                "pistol_wins": 2,
+                "low_buy_vs_full_buy_rounds": 2,
+                "low_buy_vs_full_buy_wins": 1,
+                "hits": 50,
+                "shots": 100,
+            },
+            "2": {
+                "rounds": 10,
+                "wins": 4,
+                "pistol_rounds": 2,
+                "pistol_wins": 0,
+                "full_buy_vs_low_buy_rounds": 2,
+                "full_buy_vs_low_buy_wins": 1,
+                "hits": 40,
+                "shots": 100,
+            },
+        }
+        match["map_results"] = json.dumps(results)
+        before = store.features(match, at, _ROSTER1, _ROSTER2)
+        self.assertEqual(0.0, before["team1_counter_round_style_maps_30d"])
+
+        self._update(store, match, at)
+        after = store.features(
+            match, at + timedelta(days=1), _ROSTER1, _ROSTER2
+        )
+        reverse = store.features(
+            _match(team1_id=2, team2_id=1),
+            at + timedelta(days=1),
+            _ROSTER2,
+            _ROSTER1,
+        )
+
+        self.assertEqual(1.0, after["team1_counter_round_style_maps_30d"])
+        self.assertGreater(
+            after["team1_counter_round_style_pistol_win_rate_30d"],
+            after["team2_counter_round_style_pistol_win_rate_30d"],
+        )
+        for key, value in after.items():
+            if key.startswith("team1_counter_round_style_"):
+                self.assertAlmostEqual(
+                    value, reverse[key.replace("team1_", "team2_", 1)], msg=key
+                )
+            elif key.startswith("diff_counter_round_style_"):
+                self.assertAlmostEqual(value, -reverse[key], msg=key)
+
     def test_cache_and_de_cache_share_one_canonical_history(self) -> None:
         store = EnrichedCounterStore()
         at = datetime(2025, 1, 1, tzinfo=UTC)

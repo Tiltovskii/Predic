@@ -9,6 +9,51 @@ from datetime import datetime
 _WINDOWS = (1, 3, 7, 14, 30, 90, 180)
 _LAST_COUNTS = (3, 5, 10, 20)
 _HALF_LIVES = (7, 30, 90)
+_ROUND_STYLE_WINDOWS = (30, 180)
+_ROUND_STYLE_RATES = {
+    "t_win_rate": ("t_wins", "t_rounds"),
+    "ct_win_rate": ("ct_wins", "ct_rounds"),
+    "pistol_win_rate": ("pistol_wins", "pistol_rounds"),
+    "eco_win_rate": ("eco_wins", "eco_rounds"),
+    "force_win_rate": ("force_wins", "force_rounds"),
+    "full_buy_win_rate": ("full_buy_wins", "full_buy_rounds"),
+    "full_buy_duel_win_rate": (
+        "full_buy_vs_full_buy_wins",
+        "full_buy_vs_full_buy_rounds",
+    ),
+    "low_buy_upset_rate": (
+        "low_buy_vs_full_buy_wins",
+        "low_buy_vs_full_buy_rounds",
+    ),
+    "anti_low_buy_conversion": (
+        "full_buy_vs_low_buy_wins",
+        "full_buy_vs_low_buy_rounds",
+    ),
+    "opening_conversion": ("opening_wins", "opening_rounds"),
+    "opening_recovery": (
+        "opening_recovery_wins",
+        "opening_conceded_rounds",
+    ),
+    "close_round_win_rate": ("close_wins", "close_rounds"),
+    "trailing_3plus_recovery": (
+        "trailing_3plus_wins",
+        "trailing_3plus_rounds",
+    ),
+    "after_win_conversion": ("after_win_wins", "after_win_rounds"),
+    "after_loss_recovery": ("after_loss_wins", "after_loss_rounds"),
+    "clutch_conversion": ("clutches", "clutch_attempts"),
+    "hit_rate": ("hits", "shots"),
+}
+_ROUND_STYLE_PER_ROUND = (
+    "trade_kills",
+    "trade_deaths",
+    "flash_assists",
+    "grenades_damage",
+    "utility_value",
+    "damage",
+    "equipment_value",
+    "money_spent",
+)
 _UNKNOWN_MAP_NAMES = frozenset(
     {"", "-", "?", "n/a", "na", "none", "null", "tbd", "unknown"}
 )
@@ -254,6 +299,68 @@ class _PlayerState:
     outcomes: deque[_AggregateOutcome] = field(default_factory=deque)
 
 
+@dataclass(frozen=True)
+class RoundStyleOutcome:
+    at: datetime
+    values: dict[str, float]
+
+
+def round_stats_for_team(
+    game: dict[str, object], team_id: int
+) -> dict[str, float] | None:
+    raw = game.get("round_stats") or {}
+    if not isinstance(raw, dict):
+        return None
+    values = raw.get(str(team_id), raw.get(team_id))
+    if not isinstance(values, dict):
+        return None
+    result: dict[str, float] = {}
+    for key, value in values.items():
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            result[str(key)] = number
+    if result.get("rounds", 0.0) <= 0:
+        return None
+    return result
+
+
+def round_style_features(
+    outcomes: deque[RoundStyleOutcome] | list[RoundStyleOutcome], at: datetime
+) -> dict[str, float]:
+    result: dict[str, float] = {}
+    values = list(outcomes)
+    for window in _ROUND_STYLE_WINDOWS:
+        recent = [item.values for item in values if _age_days(at, item.at) < window]
+        totals: defaultdict[str, float] = defaultdict(float)
+        for item in recent:
+            for key, value in item.items():
+                totals[key] += value
+        rounds = totals["rounds"]
+        classified = (
+            totals["eco_rounds"]
+            + totals["force_rounds"]
+            + totals["full_buy_rounds"]
+        )
+        result[f"round_style_maps_{window}d"] = float(len(recent))
+        result[f"round_style_rounds_{window}d"] = rounds
+        result[f"round_style_economy_coverage_{window}d"] = (
+            classified / rounds if rounds else 0.0
+        )
+        for name, (numerator, denominator) in _ROUND_STYLE_RATES.items():
+            result[f"round_style_{name}_{window}d"] = _smoothed_rate(
+                totals[numerator], totals[denominator]
+            )
+            result[f"round_style_{name}_support_{window}d"] = totals[denominator]
+        for metric in _ROUND_STYLE_PER_ROUND:
+            result[f"round_style_{metric}_per_round_{window}d"] = (
+                totals[metric] / rounds if rounds else 0.0
+            )
+    return result
+
+
 def _aggregate_features(state: _AggregateState, at: datetime) -> dict[str, float]:
     recent = [item for item in state.outcomes if _age_days(at, item.at) < 90]
     return {
@@ -301,6 +408,7 @@ class EnrichedCounterStore:
         )
         self.h2h: dict[tuple[int, int], _AggregateState] = defaultdict(_AggregateState)
         self.maps: dict[int, dict[str, _AggregateState]] = defaultdict(dict)
+        self.round_styles: dict[int, deque[RoundStyleOutcome]] = defaultdict(deque)
 
     @staticmethod
     def _ids(roster: tuple[str, ...]) -> tuple[str, ...]:
@@ -967,6 +1075,9 @@ class EnrichedCounterStore:
             lambda team_id, roster: self._lineup_features(team_id, roster, at),
             lambda team_id, roster: self._context_features(team_id, match, at),
             lambda team_id, roster: self._map_features(team_id, at),
+            lambda team_id, roster: round_style_features(
+                self.round_styles[team_id], at
+            ),
         ):
             self._add_sides(
                 result,
@@ -1147,3 +1258,9 @@ class EnrichedCounterStore:
             ):
                 state = self.maps[team_id].setdefault(name, _AggregateState())
                 state.add(at, win, win, share)
+                round_stats = round_stats_for_team(game, team_id)
+                if round_stats is not None:
+                    style = self.round_styles[team_id]
+                    style.append(RoundStyleOutcome(at, round_stats))
+                    while style and _age_days(at, style[0].at) >= 365:
+                        style.popleft()

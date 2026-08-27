@@ -15,9 +15,100 @@ from predic_v2.baseline import (
     _load_lineups,
     _parse_feature_times,
     _select_feature_columns,
+    _summarise_game_rounds,
     build_point_in_time_features,
 )
 from predic_v2.counters import strict_veto_complete
+
+
+class RoundSummaryTest(unittest.TestCase):
+    @staticmethod
+    def _side(
+        clan: str,
+        *,
+        win: int,
+        cumulative: int,
+        pistol: int,
+        economy: int,
+        enemy_economy: int,
+        opening: int,
+    ) -> dict[str, object]:
+        return {
+            "clan_name": clan,
+            "team_side": "T" if clan == "left" else "CT",
+            "win": win,
+            "cumulative_wins": cumulative,
+            "pistol_round": pistol,
+            "economy_level": economy,
+            "enemy_economy_level": enemy_economy,
+            "first_kills": opening,
+            "first_death": 1 - opening,
+            "trade_kills": 1,
+            "trade_deaths": 1,
+            "hits": 10,
+            "shots": 20,
+        }
+
+    def test_complete_rounds_reduce_to_additive_team_totals(self) -> None:
+        rounds = []
+        scores = {"left": 0, "right": 0}
+        for number, winner, pistol, economies in (
+            (1, "left", 1, (-1, -1)),
+            (2, "right", 0, (0, 2)),
+            (3, "left", 0, (2, 2)),
+        ):
+            scores[winner] += 1
+            left_win = int(winner == "left")
+            rounds.append(
+                {
+                    "round_number": number,
+                    "game_round_team_clans": [
+                        self._side(
+                            "left",
+                            win=left_win,
+                            cumulative=scores["left"],
+                            pistol=pistol,
+                            economy=economies[0],
+                            enemy_economy=economies[1],
+                            opening=left_win,
+                        ),
+                        self._side(
+                            "right",
+                            win=1 - left_win,
+                            cumulative=scores["right"],
+                            pistol=pistol,
+                            economy=economies[1],
+                            enemy_economy=economies[0],
+                            opening=1 - left_win,
+                        ),
+                    ],
+                }
+            )
+        payload = {
+            "winner_team_clan": {
+                "team_id": 1,
+                "clan_name": "left",
+                "team": {"id": 1},
+            },
+            "loser_team_clan": {
+                "team_id": 2,
+                "clan_name": "right",
+                "team": {"id": 2},
+            },
+            "winner_clan_score": 2,
+            "loser_clan_score": 1,
+            "game_rounds": rounds,
+        }
+
+        summary = _summarise_game_rounds(payload)
+
+        self.assertEqual(3.0, summary[1]["rounds"])
+        self.assertEqual(2.0, summary[1]["wins"])
+        self.assertEqual(1.0, summary[1]["pistol_wins"])
+        self.assertEqual(1.0, summary[1]["low_buy_vs_full_buy_rounds"])
+        self.assertEqual(0.0, summary[1]["low_buy_vs_full_buy_wins"])
+        self.assertEqual(1.0, summary[1]["full_buy_vs_full_buy_wins"])
+        self.assertEqual(30.0, summary[1]["hits"])
 
 
 class ExternalRankingIndexTest(unittest.TestCase):

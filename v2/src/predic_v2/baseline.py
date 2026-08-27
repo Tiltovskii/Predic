@@ -16,17 +16,11 @@ from pathlib import Path
 from typing import Any
 
 from .counters import EnrichedCounterStore, strict_veto_complete
+from .weighting import TIER_WEIGHT_PROFILES, tier_weight
 
 _STREAM = "bo3-history-2020-2026-v2"
 _WINDOWS = (30, 90, 180)
-_TIER_WEIGHTS = {
-    "s": 1.0,
-    "a": 0.80,
-    "b": 0.55,
-    "c": 0.35,
-    "d": 0.20,
-    "unknown": 0.30,
-}
+_TIER_WEIGHTS = TIER_WEIGHT_PROFILES["balanced"]
 
 
 def _normalise(value: str) -> str:
@@ -77,6 +71,181 @@ def _extract_veto_actions(payload: dict[str, object]) -> list[dict[str, object]]
             }
         )
     return sorted(actions, key=lambda item: (int(item["order"]), item["map_name"]))
+
+
+_ROUND_SUM_FIELDS = (
+    "clutches",
+    "clutch_attempts",
+    "trade_kills",
+    "trade_deaths",
+    "flash_assists",
+    "grenades_damage",
+    "utility_value",
+    "damage",
+    "hits",
+    "shots",
+    "equipment_value",
+    "money_spent",
+)
+
+
+def _team_id_from_clan(raw: object) -> int | None:
+    if not isinstance(raw, dict):
+        return None
+    team = raw.get("team") or {}
+    value = (team.get("id") if isinstance(team, dict) else None) or raw.get("team_id")
+    try:
+        team_id = int(value or 0)
+    except (TypeError, ValueError):
+        return None
+    return team_id or None
+
+
+def _summarise_game_rounds(payload: dict[str, object]) -> dict[int, dict[str, float]]:
+    """Reduce one complete game payload to stable team-level round totals.
+
+    The source exposes aggregate stats for both teams in every round. We retain
+    only additive numerators and denominators here, so every downstream rate can
+    be recomputed over arbitrary causal windows without averaging averages.
+    """
+    winner_id = _team_id_from_clan(payload.get("winner_team_clan"))
+    loser_id = _team_id_from_clan(payload.get("loser_team_clan"))
+    expected_ids = {winner_id, loser_id}
+    if None in expected_ids or len(expected_ids) != 2:
+        return {}
+    clan_ids: dict[str, int] = {}
+    for key, team_id in (
+        ("winner_team_clan", winner_id),
+        ("loser_team_clan", loser_id),
+    ):
+        clan = payload.get(key) or {}
+        if not isinstance(clan, dict):
+            return {}
+        clan_name = str(clan.get("clan_name") or "").strip().casefold()
+        if not clan_name:
+            return {}
+        clan_ids[clan_name] = int(team_id)
+
+    raw_rounds = payload.get("game_rounds") or []
+    if not isinstance(raw_rounds, list) or not raw_rounds:
+        return {}
+    try:
+        expected_rounds = int(payload.get("winner_clan_score") or 0) + int(
+            payload.get("loser_clan_score") or 0
+        )
+    except (TypeError, ValueError):
+        return {}
+    if expected_rounds <= 0 or len(raw_rounds) != expected_rounds:
+        return {}
+
+    summaries: dict[int, defaultdict[str, float]] = {
+        int(team_id): defaultdict(float) for team_id in expected_ids if team_id
+    }
+    previous_wins: dict[int, int | None] = {int(team_id): None for team_id in expected_ids if team_id}
+    for raw_round in sorted(
+        raw_rounds,
+        key=lambda item: int(item.get("round_number") or 0)
+        if isinstance(item, dict)
+        else 0,
+    ):
+        if not isinstance(raw_round, dict):
+            return {}
+        raw_sides = raw_round.get("game_round_team_clans") or []
+        if not isinstance(raw_sides, list) or len(raw_sides) != 2:
+            return {}
+        sides: dict[int, dict[str, object]] = {}
+        for raw_side in raw_sides:
+            if not isinstance(raw_side, dict):
+                return {}
+            clan_name = str(raw_side.get("clan_name") or "").strip().casefold()
+            team_id = clan_ids.get(clan_name)
+            if team_id is None or team_id in sides:
+                return {}
+            sides[team_id] = raw_side
+        if set(sides) != expected_ids:
+            return {}
+
+        for team_id, raw_side in sides.items():
+            opponent_id = next(value for value in expected_ids if value != team_id)
+            opponent = sides[int(opponent_id)]
+            summary = summaries[team_id]
+            win = float(bool(raw_side.get("win")))
+            summary["rounds"] += 1.0
+            summary["wins"] += win
+            side = str(raw_side.get("team_side") or "").strip().casefold()
+            if side in {"t", "ct"}:
+                summary[f"{side}_rounds"] += 1.0
+                summary[f"{side}_wins"] += win
+
+            pistol = bool(raw_side.get("pistol_round"))
+            if pistol:
+                summary["pistol_rounds"] += 1.0
+                summary["pistol_wins"] += win
+            try:
+                economy = int(raw_side.get("economy_level"))
+                enemy_economy = int(opponent.get("economy_level"))
+            except (TypeError, ValueError):
+                economy = enemy_economy = -1
+            if not pistol and economy in {0, 1, 2}:
+                name = {0: "eco", 1: "force", 2: "full_buy"}[economy]
+                summary[f"{name}_rounds"] += 1.0
+                summary[f"{name}_wins"] += win
+                if economy == 2 and enemy_economy == 2:
+                    context = "full_buy_vs_full_buy"
+                elif economy <= 1 and enemy_economy == 2:
+                    context = "low_buy_vs_full_buy"
+                elif economy == 2 and enemy_economy in {0, 1}:
+                    context = "full_buy_vs_low_buy"
+                else:
+                    context = None
+                if context is not None:
+                    summary[f"{context}_rounds"] += 1.0
+                    summary[f"{context}_wins"] += win
+
+            opening = float(raw_side.get("first_kills") or 0) > 0
+            conceded = float(raw_side.get("first_death") or 0) > 0
+            if opening:
+                summary["opening_rounds"] += 1.0
+                summary["opening_wins"] += win
+            if conceded:
+                summary["opening_conceded_rounds"] += 1.0
+                summary["opening_recovery_wins"] += win
+
+            previous = previous_wins[team_id]
+            if previous is not None:
+                context = "after_win" if previous else "after_loss"
+                summary[f"{context}_rounds"] += 1.0
+                summary[f"{context}_wins"] += win
+            previous_wins[team_id] = int(win)
+
+            try:
+                current_score = int(raw_side.get("cumulative_wins"))
+                opponent_score = int(opponent.get("cumulative_wins"))
+                prior_diff = (current_score - int(win)) - (
+                    opponent_score - int(1.0 - win)
+                )
+            except (TypeError, ValueError):
+                prior_diff = None
+            if prior_diff is not None and abs(prior_diff) <= 2:
+                summary["close_rounds"] += 1.0
+                summary["close_wins"] += win
+            if prior_diff is not None and prior_diff <= -3:
+                summary["trailing_3plus_rounds"] += 1.0
+                summary["trailing_3plus_wins"] += win
+
+            for metric in _ROUND_SUM_FIELDS:
+                try:
+                    summary[metric] += float(raw_side.get(metric) or 0.0)
+                except (TypeError, ValueError):
+                    continue
+
+    winner_score = int(payload.get("winner_clan_score") or 0)
+    loser_score = int(payload.get("loser_clan_score") or 0)
+    if int(summaries[int(winner_id)]["wins"]) != winner_score or int(
+        summaries[int(loser_id)]["wins"]
+    ) != loser_score:
+        return {}
+    return {team_id: dict(values) for team_id, values in summaries.items()}
 
 
 @dataclass(frozen=True)
@@ -201,7 +370,7 @@ def extract_bo3_match_table(
     *,
     stream: str = _STREAM,
 ) -> dict[str, object]:
-    """Create a compact series table without reading round or player metrics."""
+    """Create a compact series table and reduce available complete round payloads."""
 
     state = Path(state_db).resolve()
     output = Path(output_csv).resolve()
@@ -209,6 +378,19 @@ def extract_bo3_match_table(
     connection = sqlite3.connect(state)
     connection.row_factory = sqlite3.Row
     lineups = _load_lineups(connection, stream)
+    game_paths = {
+        int(row["game_id"]): Path(row["output_dir"]) / row["object_path"]
+        for row in connection.execute(
+            """
+            SELECT g.game_id, s.object_path, j.output_dir
+            FROM bo3_game_index AS g
+            JOIN bo3_snapshot AS s ON s.snapshot_id = g.last_snapshot_id
+            JOIN bo3_capture_job AS j ON j.stream = g.stream
+            WHERE g.stream = ? AND g.rounds_complete = 1
+            """,
+            (stream,),
+        )
+    }
     rows = connection.execute(
         """
         SELECT m.*, s.object_path, j.output_dir
@@ -255,6 +437,7 @@ def extract_bo3_match_table(
     ]
     skipped = defaultdict(int)
     written = 0
+    games_with_round_stats = 0
     temporary = output.with_suffix(output.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8", newline="") as target:
         writer = csv.DictWriter(target, fieldnames=fields)
@@ -302,15 +485,35 @@ def extract_bo3_match_table(
                 winner_score = game.get("winner_clan_score")
                 loser_score = game.get("loser_clan_score")
                 if winner in team_rounds and loser in team_rounds:
-                    map_results.append(
-                        {
-                            "map_name": game.get("map_name") or "unknown",
-                            "winner_team_id": int(winner),
-                            "loser_team_id": int(loser),
-                            "winner_score": winner_score,
-                            "loser_score": loser_score,
-                        }
-                    )
+                    map_result: dict[str, object] = {
+                        "game_id": game.get("id"),
+                        "map_name": game.get("map_name") or "unknown",
+                        "winner_team_id": int(winner),
+                        "loser_team_id": int(loser),
+                        "winner_score": winner_score,
+                        "loser_score": loser_score,
+                    }
+                    try:
+                        game_id = int(game.get("id") or 0)
+                    except (TypeError, ValueError):
+                        game_id = 0
+                    game_path = game_paths.get(game_id)
+                    if game_path is not None:
+                        try:
+                            game_payload = json.loads(game_path.read_bytes())
+                        except (OSError, json.JSONDecodeError):
+                            skipped["unreadable_game_rounds"] += 1
+                        else:
+                            round_stats = _summarise_game_rounds(game_payload)
+                            if set(round_stats) == {team1_id, team2_id}:
+                                map_result["round_stats"] = {
+                                    str(team_id): values
+                                    for team_id, values in round_stats.items()
+                                }
+                                games_with_round_stats += 1
+                            else:
+                                skipped["invalid_game_rounds"] += 1
+                    map_results.append(map_result)
                 if (
                     winner in team_rounds
                     and loser in team_rounds
@@ -385,6 +588,8 @@ def extract_bo3_match_table(
         "source_matches": len(rows),
         "written_matches": written,
         "matches_with_lineups": len({match_id for match_id, _ in lineups}),
+        "round_payloads_indexed": len(game_paths),
+        "games_with_round_stats": games_with_round_stats,
         "skipped": dict(skipped),
     }
 
@@ -679,9 +884,7 @@ def build_point_in_time_features(
                 and int(match["team1_rounds"]) + int(match["team2_rounds"])
                 else ""
             ),
-            "sample_weight": _TIER_WEIGHTS.get(
-                match["tournament_tier"], _TIER_WEIGHTS["unknown"]
-            ),
+            "sample_weight": tier_weight(match["tournament_tier"]),
         }
         team1_features, team2_features = (
             _team_features(team1, at),
@@ -766,13 +969,11 @@ def build_point_in_time_features(
         # freezes simultaneous/overlapping matches against one another.
         outcome1 = int(match["team1_win"])
         expected1 = 1.0 / (1.0 + 10.0 ** ((team2.elo - team1.elo) / 400.0))
-        tier_weight = _TIER_WEIGHTS.get(
-            match["tournament_tier"], _TIER_WEIGHTS["unknown"]
-        )
+        tier_match_weight = tier_weight(match["tournament_tier"])
         margin = abs(int(match["team1_map_wins"]) - int(match["team2_map_wins"]))
         delta = (
             28.0
-            * (0.75 + 0.5 * tier_weight)
+            * (0.75 + 0.5 * tier_match_weight)
             * (1.0 + 0.12 * margin)
             * (outcome1 - expected1)
         )

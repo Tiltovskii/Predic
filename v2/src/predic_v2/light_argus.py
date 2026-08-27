@@ -16,6 +16,7 @@ from torch import nn
 from .baseline import _binary_metrics, _confidence_slices
 from .light_argus_data import FORMAT_VERSION
 from .map_baseline import _slice_metrics
+from .weighting import TIER_WEIGHT_PROFILES, tier_weight
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,9 @@ class LightArgusConfig:
     dropout: float = 0.10
     use_player_identity: bool = True
     use_team_identity: bool = True
+    fusion_head: str = "mlp"
+    cross_layers: int = 2
+    cross_rank: int = 32
 
 
 @dataclass
@@ -130,6 +134,9 @@ class _ArrayStore:
         dropout: float,
         use_player_identity: bool,
         use_team_identity: bool,
+        fusion_head: str = "mlp",
+        cross_layers: int = 2,
+        cross_rank: int = 32,
     ) -> LightArgusConfig:
         vocab = self.vocabularies
         return LightArgusConfig(
@@ -151,6 +158,9 @@ class _ArrayStore:
             dropout=dropout,
             use_player_identity=use_player_identity,
             use_team_identity=use_team_identity,
+            fusion_head=fusion_head,
+            cross_layers=cross_layers,
+            cross_rank=cross_rank,
         )
 
 
@@ -213,9 +223,24 @@ def _normalise(values: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndar
 
 
 class _BatchCollator:
-    def __init__(self, data: _ArrayStore, normalisation: _Normalisation):
+    def __init__(
+        self,
+        data: _ArrayStore,
+        normalisation: _Normalisation,
+        *,
+        tier_weight_profile: str = "dataset",
+    ):
+        if tier_weight_profile not in {"dataset", *TIER_WEIGHT_PROFILES}:
+            raise ValueError("unknown tier weight profile")
         self.data = data
         self.normalisation = normalisation
+        self.tier_weights: np.ndarray | None = None
+        if tier_weight_profile != "dataset":
+            self.tier_weights = np.ones(
+                len(data.vocabularies["tier"]), dtype=np.float32
+            )
+            for name, index in data.vocabularies["tier"].items():
+                self.tier_weights[index] = tier_weight(name, tier_weight_profile)
 
     def __call__(self, indices: np.ndarray) -> dict[str, torch.Tensor]:
         indices = np.asarray(indices, dtype=np.int64)
@@ -341,14 +366,74 @@ class _BatchCollator:
             "target_label": np.asarray(
                 self.data.target_label[indices], dtype=np.float32
             ),
-            "target_weight": np.asarray(
-                self.data.target_weight[indices], dtype=np.float32
+            "target_weight": (
+                np.asarray(self.data.target_weight[indices], dtype=np.float32)
+                if self.tier_weights is None
+                else self.tier_weights[
+                    np.asarray(self.data.target_tier[indices], dtype=np.int64)
+                ]
             ),
             "row_index": indices,
         }
         return {
             key: torch.from_numpy(np.asarray(value)) for key, value in result.items()
         }
+
+
+class DcnV2CrossNetwork(nn.Module):
+    """Low-rank DCNv2 cross tower: x <- x + x0 * (W x + b)."""
+
+    def __init__(self, dimension: int, *, layers: int = 2, rank: int = 32):
+        super().__init__()
+        if min(dimension, layers, rank) < 1:
+            raise ValueError("DCNv2 dimension, layers and rank must be positive")
+        effective_rank = min(dimension, rank)
+        self.down = nn.ModuleList(
+            nn.Linear(dimension, effective_rank, bias=False) for _ in range(layers)
+        )
+        self.up = nn.ModuleList(
+            nn.Linear(effective_rank, dimension, bias=False) for _ in range(layers)
+        )
+        self.bias = nn.ParameterList(
+            nn.Parameter(torch.zeros(dimension)) for _ in range(layers)
+        )
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        crossed = inputs
+        for down, up, bias in zip(self.down, self.up, self.bias):
+            crossed = crossed + inputs * (up(down(crossed)) + bias)
+        return crossed
+
+
+class DcnV2SideScorer(nn.Module):
+    """Parallel compact cross/deep fusion used with a shared side scorer."""
+
+    def __init__(
+        self,
+        dimension: int,
+        *,
+        layers: int = 2,
+        rank: int = 32,
+        dropout: float = 0.10,
+    ):
+        super().__init__()
+        hidden = max(32, dimension // 2)
+        self.cross = DcnV2CrossNetwork(dimension, layers=layers, rank=rank)
+        self.deep = nn.Sequential(
+            nn.LayerNorm(dimension),
+            nn.Linear(dimension, hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, hidden),
+            nn.GELU(),
+        )
+        self.output = nn.Sequential(
+            nn.LayerNorm(dimension + hidden),
+            nn.Linear(dimension + hidden, 1),
+        )
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        return self.output(torch.cat((self.cross(inputs), self.deep(inputs)), dim=-1))
 
 
 class LightTargetAwareArgus(nn.Module):
@@ -358,6 +443,8 @@ class LightTargetAwareArgus(nn.Module):
         super().__init__()
         if config.d_model % config.heads:
             raise ValueError("d_model must be divisible by heads")
+        if config.fusion_head not in {"mlp", "dcnv2"}:
+            raise ValueError("fusion_head must be mlp or dcnv2")
         self.config = config
         dimension = config.d_model
         self.player_embedding = nn.Embedding(
@@ -422,12 +509,20 @@ class LightTargetAwareArgus(nn.Module):
             nn.GELU(),
             nn.LayerNorm(dimension),
         )
-        self.side_scorer = nn.Sequential(
-            nn.Linear(4 * dimension, 2 * dimension),
-            nn.GELU(),
-            nn.LayerNorm(2 * dimension),
-            nn.Linear(2 * dimension, 1),
-        )
+        if config.fusion_head == "dcnv2":
+            self.side_scorer = DcnV2SideScorer(
+                4 * dimension,
+                layers=config.cross_layers,
+                rank=config.cross_rank,
+                dropout=config.dropout,
+            )
+        else:
+            self.side_scorer = nn.Sequential(
+                nn.Linear(4 * dimension, 2 * dimension),
+                nn.GELU(),
+                nn.LayerNorm(2 * dimension),
+                nn.Linear(2 * dimension, 1),
+            )
 
     def _shared_embedding(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         return (
@@ -821,6 +916,10 @@ def train_light_argus(
     layers: int = 3,
     heads: int = 4,
     dropout: float = 0.10,
+    fusion_head: str = "dcnv2",
+    cross_layers: int = 2,
+    cross_rank: int = 32,
+    tier_weight_profile: str = "dataset",
     use_player_identity: bool = True,
     use_team_identity: bool = True,
     device: str = "auto",
@@ -870,9 +969,14 @@ def train_light_argus(
         dropout=dropout,
         use_player_identity=use_player_identity,
         use_team_identity=use_team_identity,
+        fusion_head=fusion_head,
+        cross_layers=cross_layers,
+        cross_rank=cross_rank,
     )
     tune_normalisation = _fit_normalisation(data, tune_train, tune_cutoff)
-    tune_collator = _BatchCollator(data, tune_normalisation)
+    tune_collator = _BatchCollator(
+        data, tune_normalisation, tier_weight_profile=tier_weight_profile
+    )
     tune_model = LightTargetAwareArgus(config)
     tune_model, best_epoch, tuning_history = _train_model(
         tune_model,
@@ -920,7 +1024,11 @@ def train_light_argus(
             if min(len(current_train), len(current_test)) == 0:
                 continue
             current_normalisation = _fit_normalisation(data, current_train, fold_cutoff)
-            current_collator = _BatchCollator(data, current_normalisation)
+            current_collator = _BatchCollator(
+                data,
+                current_normalisation,
+                tier_weight_profile=tier_weight_profile,
+            )
             torch.manual_seed(seed + 100 + fold_number)
             current_model = LightTargetAwareArgus(config)
             current_model, _, current_history = _train_model(
@@ -983,7 +1091,11 @@ def train_light_argus(
     elif refit:
         full_train = _subsample(full_train, max_train_rows, rng)
         final_normalisation = _fit_normalisation(data, full_train, test_cutoff)
-        final_collator = _BatchCollator(data, final_normalisation)
+        final_collator = _BatchCollator(
+            data,
+            final_normalisation,
+            tier_weight_profile=tier_weight_profile,
+        )
         torch.manual_seed(seed + 1)
         final_model = LightTargetAwareArgus(config)
         final_model, _, refit_history = _train_model(
@@ -1064,6 +1176,7 @@ def train_light_argus(
             "same_series_maps_share_pre_series_history": True,
             "target_aware_early_binding": True,
             "max_history_per_player": config.max_history,
+            "tier_weight_profile": tier_weight_profile,
         },
         "model": {
             **asdict(config),
