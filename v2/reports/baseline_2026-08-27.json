@@ -43,6 +43,25 @@
     "implied_winner_roc_auc": 0.7266993883,
     "implied_winner_logloss": 0.6049306036
   },
+  "round_share_regression_test": {
+    "rows": 8950,
+    "mae": 0.1007666314,
+    "rmse": 0.1293801027,
+    "constant_0_5_mae": 0.1191514314,
+    "constant_0_5_rmse": 0.1498685791,
+    "winner_accuracy_at_0_5": 0.6652513966,
+    "target_winner_direction_agreement": 0.9546368715
+  },
+  "winner_monthly_walk_forward_test": {
+    "rows": 10684,
+    "accuracy": 0.6542493448,
+    "roc_auc": 0.7136888917,
+    "logloss": 0.6132918455,
+    "brier": 0.2132436866,
+    "ece_10bin": 0.0188015511,
+    "retrain": "monthly_full_refit",
+    "validation_days": 90
+  },
   "baselines": {
     "constant_0_5_logloss": 0.6931471806,
     "dynamic_elo_accuracy": 0.6284163235,

@@ -1,9 +1,9 @@
 # CatBoost baseline
 
-This baseline predicts a pre-match series winner and, separately, the exact
-score of completed BO3 series. It deliberately ignores round-event payloads and
-individual combat metrics. Final map scores are used only to update historical
-form after a match has been featurized.
+This baseline predicts a pre-match series winner and, separately, the series
+score and aggregate round share. It deliberately ignores round-event payloads
+and individual combat metrics. Final map/round totals are only targets or
+updates to historical form after a match has been featurized.
 
 ## Data and point-in-time rules
 
@@ -69,6 +69,34 @@ on the same slice gives 66.82%, 0.723 and 0.6132 respectively. Thus the richer
 score target is modestly useful here, although it remains a separate model and
 does not add an auxiliary loss to the winner model.
 
+The older project used a soft score-ratio regression target rather than exact
+score classes. The new equivalent is the symmetric aggregate round share
+`team1_rounds / (team1_rounds + team2_rounds)`. On 8,950 test matches with
+known round totals, CatBoost reaches MAE 0.1008 and RMSE 0.1294 versus 0.1192
+and 0.1499 for constant 0.5. Thresholding the prediction at 0.5 identifies the
+series winner 66.53% of the time. This is a dominance target, not a calibrated
+win probability: in 4.54% of series the winner took fewer aggregate rounds.
+
+## Monthly walk-forward result
+
+The frozen model above intentionally never updates its fitted trees after the
+end of 2024, even though its causal Elo/form features continue to update. A
+second backtest simulates the production policy more closely: at the start of
+each month in 2026 it selects tree count on the preceding 90 days, refits from
+scratch on every match known before that month, and predicts the complete next
+month. No fold trains on its own or any later result.
+
+| Protocol | Accuracy | ROC AUC | Log loss | Brier | ECE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Frozen weights | 65.24% | 0.706 | 0.6229 | 0.2168 | 0.0243 |
+| Monthly walk-forward | **65.42%** | **0.714** | **0.6133** | **0.2132** | **0.0188** |
+
+Regular refitting helps ranking, calibration and log loss, but only adds 0.19
+percentage point of raw accuracy. The rolling point-in-time counters already
+absorb much of the drift. For this dataset, monthly full refits are cheap and
+safer than appending trees to an old CatBoost model: old trees cannot revise
+their splits when teams, rosters and game versions change.
+
 Top winner-model features in the first run are Elo difference, recent opponent
 strength, player experience/Elo, recent round share and team identity. External
 Valve rank contributes little after the causal counters, partly because it only
@@ -100,6 +128,12 @@ v2/.venv/bin/predic-data build-baseline-features \
 v2/.venv/bin/predic-data train-catboost-baseline \
   --features-csv v2/data/baseline/features.csv \
   --output-dir v2/data/baseline/run-2026-08-27
+
+v2/.venv/bin/predic-data backtest-catboost-walk-forward \
+  --features-csv v2/data/baseline/features.csv \
+  --output-dir v2/data/baseline/run-2026-08-27 \
+  --test-from 2026-01-01 \
+  --validation-days 90
 ```
 
 Generated datasets, models, predictions and metrics live below `v2/data/` and

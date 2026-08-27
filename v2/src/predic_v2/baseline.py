@@ -479,6 +479,16 @@ def build_point_in_time_features(
             "team1_win": int(match["team1_win"]),
             "score_label": match["score_label"],
             "maps_played": int(match["maps_played"]),
+            "team1_rounds": int(match["team1_rounds"] or 0),
+            "team2_rounds": int(match["team2_rounds"] or 0),
+            "rounds_known": int(match["rounds_known"]),
+            "round_share_target": (
+                int(match["team1_rounds"])
+                / (int(match["team1_rounds"]) + int(match["team2_rounds"]))
+                if int(match["rounds_known"])
+                and int(match["team1_rounds"]) + int(match["team2_rounds"])
+                else ""
+            ),
             "sample_weight": _TIER_WEIGHTS.get(
                 match["tournament_tier"], _TIER_WEIGHTS["unknown"]
             ),
@@ -708,6 +718,21 @@ def _binary_metrics(
     }
 
 
+def _regression_metrics(y: Any, prediction: Any) -> dict[str, float]:
+    import numpy as np
+
+    y = np.asarray(y, dtype=float)
+    prediction = np.asarray(prediction, dtype=float)
+    error = prediction - y
+    return {
+        "rows": len(y),
+        "mae": float(np.mean(np.abs(error))),
+        "rmse": float(np.sqrt(np.mean(error**2))),
+        "mean_target": float(np.mean(y)),
+        "mean_prediction": float(np.mean(prediction)),
+    }
+
+
 def _confidence_slices(y: Any, probability: Any) -> dict[str, dict[str, float]]:
     import numpy as np
 
@@ -744,6 +769,8 @@ def _mirror(frame: Any, feature_columns: list[str]) -> Any:
         elif column.startswith("diff_"):
             mirrored[column] = -frame[column]
     mirrored["team1_win"] = 1 - frame["team1_win"]
+    if "round_share_target" in frame:
+        mirrored["round_share_target"] = 1.0 - frame["round_share_target"]
     score_swap = {"2-0": "0-2", "2-1": "1-2", "1-2": "2-1", "0-2": "2-0"}
     mirrored["score_label"] = (
         frame["score_label"].map(score_swap).fillna(frame["score_label"])
@@ -761,7 +788,7 @@ def train_catboost_baseline(
 ) -> dict[str, object]:
     import numpy as np
     import pandas as pd
-    from catboost import CatBoostClassifier, Pool
+    from catboost import CatBoostClassifier, CatBoostRegressor, Pool
 
     frame = pd.read_csv(features_csv, low_memory=False)
     frame["start_at"] = pd.to_datetime(frame["start_at"], utc=True)
@@ -783,6 +810,10 @@ def train_catboost_baseline(
         "team1_win",
         "score_label",
         "maps_played",
+        "team1_rounds",
+        "team2_rounds",
+        "rounds_known",
+        "round_share_target",
         "sample_weight",
     }
     feature_columns = [column for column in frame.columns if column not in excluded]
@@ -1025,6 +1056,83 @@ def train_catboost_baseline(
             ]
         score_predictions.to_csv(output / "bo3_score_test_predictions.csv", index=False)
 
+    ratio_train = train[train.round_share_target.notna()].copy()
+    ratio_validation = validation[validation.round_share_target.notna()].copy()
+    ratio_test = test[test.round_share_target.notna()].copy()
+    if len(ratio_train) and len(ratio_validation) and len(ratio_test):
+        augmented_ratio_train = pd.concat(
+            [ratio_train, _mirror(ratio_train, feature_columns)], ignore_index=True
+        )
+        augmented_ratio_validation = pd.concat(
+            [ratio_validation, _mirror(ratio_validation, feature_columns)],
+            ignore_index=True,
+        )
+        ratio_model = CatBoostRegressor(
+            loss_function="RMSE",
+            eval_metric="RMSE",
+            iterations=iterations,
+            depth=7,
+            learning_rate=0.05,
+            l2_leaf_reg=7.0,
+            random_strength=0.5,
+            random_seed=44,
+            thread_count=-1,
+            verbose=100,
+            allow_writing_files=False,
+        )
+        ratio_model.fit(
+            Pool(
+                augmented_ratio_train[feature_columns],
+                augmented_ratio_train.round_share_target,
+                cat_features=categorical,
+                weight=augmented_ratio_train.sample_weight,
+            ),
+            eval_set=Pool(
+                augmented_ratio_validation[feature_columns],
+                augmented_ratio_validation.round_share_target,
+                cat_features=categorical,
+                weight=augmented_ratio_validation.sample_weight,
+            ),
+            early_stopping_rounds=100,
+        )
+        ratio_model.save_model(output / "round_share_catboost.cbm")
+        direct_ratio = ratio_model.predict(ratio_test[feature_columns])
+        mirrored_ratio_test = _mirror(ratio_test, feature_columns)
+        inverse_ratio = 1.0 - ratio_model.predict(mirrored_ratio_test[feature_columns])
+        ratio_prediction = np.clip((direct_ratio + inverse_ratio) / 2.0, 0.0, 1.0)
+        target_direction = ratio_test.round_share_target.to_numpy() >= 0.5
+        winner = ratio_test.team1_win.to_numpy(dtype=int)
+        metrics["round_share_regression"] = {
+            **_regression_metrics(
+                ratio_test.round_share_target.to_numpy(), ratio_prediction
+            ),
+            "best_iteration": ratio_model.get_best_iteration(),
+            "winner_accuracy_at_0_5": float(
+                np.mean((ratio_prediction >= 0.5) == winner)
+            ),
+            "target_winner_direction_agreement": float(
+                np.mean(target_direction == winner)
+            ),
+            "constant_0_5": _regression_metrics(
+                ratio_test.round_share_target.to_numpy(),
+                np.full(len(ratio_test), 0.5),
+            ),
+        }
+        ratio_predictions = ratio_test[
+            [
+                "match_id",
+                "start_at",
+                "team1_name",
+                "team2_name",
+                "team1_win",
+                "round_share_target",
+            ]
+        ].copy()
+        ratio_predictions["round_share_prediction"] = ratio_prediction
+        ratio_predictions.to_csv(
+            output / "round_share_test_predictions.csv", index=False
+        )
+
     predictions = test[
         [
             "match_id",
@@ -1040,6 +1148,192 @@ def train_catboost_baseline(
     importance = model.get_feature_importance(prettified=True)
     importance.to_csv(output / "winner_feature_importance.csv", index=False)
     (output / "metrics.json").write_text(
+        json.dumps(metrics, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return metrics
+
+
+def walk_forward_catboost_backtest(
+    features_csv: str | Path,
+    output_dir: str | Path,
+    *,
+    test_from: str = "2026-01-01",
+    validation_days: int = 90,
+    iterations: int = 900,
+) -> dict[str, object]:
+    """Simulate a monthly production retrain without consuming future labels."""
+    import pandas as pd
+    from catboost import CatBoostClassifier, Pool
+
+    frame = pd.read_csv(features_csv, low_memory=False)
+    frame["start_at"] = pd.to_datetime(frame["start_at"], utc=True)
+    test_cut = pd.Timestamp(test_from, tz="UTC")
+    if test_cut.day != 1:
+        raise ValueError("test_from must be the first day of a month")
+    if validation_days < 1:
+        raise ValueError("validation_days must be positive")
+
+    excluded = {
+        "match_id",
+        "start_at",
+        "team1_name",
+        "team2_name",
+        "team1_win",
+        "score_label",
+        "maps_played",
+        "team1_rounds",
+        "team2_rounds",
+        "rounds_known",
+        "round_share_target",
+        "sample_weight",
+    }
+    feature_columns = [column for column in frame.columns if column not in excluded]
+    categorical = [
+        column
+        for column in (
+            "team1_id",
+            "team2_id",
+            "bo_type",
+            "game_version",
+            "tournament_tier",
+            "event_type",
+        )
+        if column in feature_columns
+    ]
+    for column in categorical:
+        frame[column] = frame[column].fillna("missing").astype(str)
+
+    output = Path(output_dir).resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    fold_metrics: list[dict[str, object]] = []
+    fold_predictions: list[Any] = []
+    latest_model: Any | None = None
+    last_match_at = frame.start_at.max()
+    fold_starts = pd.date_range(test_cut, last_match_at, freq="MS")
+
+    def new_model(model_iterations: int, seed: int) -> Any:
+        return CatBoostClassifier(
+            loss_function="Logloss",
+            eval_metric="Logloss",
+            iterations=model_iterations,
+            depth=7,
+            learning_rate=0.05,
+            l2_leaf_reg=6.0,
+            random_strength=0.5,
+            random_seed=seed,
+            thread_count=-1,
+            verbose=False,
+            allow_writing_files=False,
+        )
+
+    for fold_number, fold_start in enumerate(fold_starts, start=1):
+        fold_end = fold_start + pd.offsets.MonthBegin(1)
+        history = frame[frame.start_at < fold_start].copy()
+        validation_start = fold_start - pd.Timedelta(days=validation_days)
+        tuning_train = history[history.start_at < validation_start].copy()
+        tuning_validation = history[history.start_at >= validation_start].copy()
+        fold_test = frame[
+            (frame.start_at >= fold_start) & (frame.start_at < fold_end)
+        ].copy()
+        if min(len(tuning_train), len(tuning_validation), len(fold_test)) == 0:
+            continue
+
+        augmented_train = pd.concat(
+            [tuning_train, _mirror(tuning_train, feature_columns)],
+            ignore_index=True,
+        )
+        augmented_validation = pd.concat(
+            [tuning_validation, _mirror(tuning_validation, feature_columns)],
+            ignore_index=True,
+        )
+        tuning_model = new_model(iterations, 100 + fold_number)
+        tuning_model.fit(
+            Pool(
+                augmented_train[feature_columns],
+                augmented_train.team1_win,
+                cat_features=categorical,
+                weight=augmented_train.sample_weight,
+            ),
+            eval_set=Pool(
+                augmented_validation[feature_columns],
+                augmented_validation.team1_win,
+                cat_features=categorical,
+                weight=augmented_validation.sample_weight,
+            ),
+            early_stopping_rounds=100,
+        )
+        best_iteration = tuning_model.get_best_iteration()
+        selected_iterations = best_iteration + 1 if best_iteration >= 0 else iterations
+
+        # Once the tree count is selected only from past data, refit on every
+        # result available before the prediction month, including validation.
+        augmented_history = pd.concat(
+            [history, _mirror(history, feature_columns)], ignore_index=True
+        )
+        latest_model = new_model(selected_iterations, 200 + fold_number)
+        latest_model.fit(
+            Pool(
+                augmented_history[feature_columns],
+                augmented_history.team1_win,
+                cat_features=categorical,
+                weight=augmented_history.sample_weight,
+            )
+        )
+        direct = latest_model.predict_proba(fold_test[feature_columns])[:, 1]
+        mirrored_test = _mirror(fold_test, feature_columns)
+        inverse = 1.0 - latest_model.predict_proba(mirrored_test[feature_columns])[:, 1]
+        probability = (direct + inverse) / 2.0
+        current_metrics = _binary_metrics(fold_test.team1_win, probability)
+        fold_metrics.append(
+            {
+                "month": fold_start.strftime("%Y-%m"),
+                "history_rows": len(history),
+                "validation_rows": len(tuning_validation),
+                "selected_iterations": selected_iterations,
+                **current_metrics,
+            }
+        )
+        predictions = fold_test[
+            [
+                "match_id",
+                "start_at",
+                "team1_name",
+                "team2_name",
+                "team1_win",
+                "tournament_tier",
+            ]
+        ].copy()
+        predictions["team1_win_probability"] = probability
+        predictions["training_cutoff"] = fold_start.isoformat()
+        fold_predictions.append(predictions)
+        print(
+            f"walk-forward {fold_start:%Y-%m}: "
+            f"rows={len(fold_test)} accuracy={current_metrics['accuracy']:.4f} "
+            f"iterations={selected_iterations}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    if not fold_predictions or latest_model is None:
+        raise ValueError("walk-forward split produced no folds")
+    predictions = pd.concat(fold_predictions, ignore_index=True)
+    overall = _binary_metrics(predictions.team1_win, predictions.team1_win_probability)
+    metrics: dict[str, object] = {
+        "protocol": {
+            "test_from": test_from,
+            "retrain": "monthly_full_refit",
+            "validation_days": validation_days,
+            "future_labels_used": False,
+        },
+        "overall": overall,
+        "confidence_slices": _confidence_slices(
+            predictions.team1_win, predictions.team1_win_probability
+        ),
+        "folds": fold_metrics,
+    }
+    latest_model.save_model(output / "winner_catboost_walk_forward_latest.cbm")
+    predictions.to_csv(output / "walk_forward_test_predictions.csv", index=False)
+    (output / "walk_forward_metrics.json").write_text(
         json.dumps(metrics, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     return metrics

@@ -10,6 +10,7 @@ from .baseline import (
     build_point_in_time_features,
     extract_bo3_match_table,
     train_catboost_baseline,
+    walk_forward_catboost_backtest,
 )
 from .bo3_capture import (
     audit_bo3_capture,
@@ -377,13 +378,23 @@ def _parser() -> argparse.ArgumentParser:
 
     baseline_train_parser = subparsers.add_parser(
         "train-catboost-baseline",
-        help="Train winner and BO3 exact-score CatBoost temporal baselines",
+        help="Train winner, BO3 score and round-share CatBoost baselines",
     )
     baseline_train_parser.add_argument("--features-csv", required=True)
     baseline_train_parser.add_argument("--output-dir", required=True)
     baseline_train_parser.add_argument("--train-before", default="2025-01-01")
     baseline_train_parser.add_argument("--test-from", default="2026-01-01")
     baseline_train_parser.add_argument("--iterations", type=int, default=900)
+
+    walk_forward_parser = subparsers.add_parser(
+        "backtest-catboost-walk-forward",
+        help="Simulate monthly retraining using only results known at each cutoff",
+    )
+    walk_forward_parser.add_argument("--features-csv", required=True)
+    walk_forward_parser.add_argument("--output-dir", required=True)
+    walk_forward_parser.add_argument("--test-from", default="2026-01-01")
+    walk_forward_parser.add_argument("--validation-days", type=int, default=90)
+    walk_forward_parser.add_argument("--iterations", type=int, default=900)
     return parser
 
 
@@ -646,6 +657,16 @@ def main() -> None:
             args.output_dir,
             train_before=args.train_before,
             test_from=args.test_from,
+            iterations=args.iterations,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    if args.command == "backtest-catboost-walk-forward":
+        result = walk_forward_catboost_backtest(
+            args.features_csv,
+            args.output_dir,
+            test_from=args.test_from,
+            validation_days=args.validation_days,
             iterations=args.iterations,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))

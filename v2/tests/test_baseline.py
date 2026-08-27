@@ -111,6 +111,7 @@ class ExternalRankingIndexTest(unittest.TestCase):
             self.assertEqual("1.0", rows[1]["team1_matches"])
             self.assertEqual("1500.0", rows[0]["team1_elo"])
             self.assertGreater(float(rows[1]["team1_elo"]), 1500.0)
+            self.assertAlmostEqual(26 / 36, float(rows[0]["round_share_target"]))
 
 
 if __name__ == "__main__":
